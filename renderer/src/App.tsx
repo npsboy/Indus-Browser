@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import logo from "./assets/logos/Logo-White.png";
 import favicon from "./assets/logos/Favicon.png";
@@ -33,26 +33,58 @@ function App() {
   }
 
   function addTab(newUrl: string) {
-    const newTab: Tab = {
-      id: crypto.randomUUID(),
-      url: newUrl,
-      isActive: true
-    };
-    setTabs([...tabs.map(tab => ({ ...tab, isActive: false })), newTab]);
+    setTabs((currentTabs) => {
+      const newTab: Tab = {
+        id: crypto.randomUUID(),
+        url: newUrl,
+        isActive: true
+      };
+      return [...currentTabs.map(tab => ({ ...tab, isActive: false })), newTab];
+    });
   }
+
+  useEffect(() => {
+    const handler = () => {
+      addTab("https://google.com");
+    };
+
+    const cleanup = (window as any).api?.onNewTab(handler);
+    return cleanup;
+  }, []);
+
 
   function closeTab(targetId: string) {
-    let newTabs = tabs.filter(tab => tab.id !== targetId);
-    if (newTabs.length > 0) {
-      newTabs[newTabs.length - 1].isActive = true;
-    }
-    setTabs(newTabs);
+    setTabs((currentTabs) => {
+      const newTabs = currentTabs.filter(tab => tab.id !== targetId);
+      if (newTabs.length > 0) {
+        newTabs[newTabs.length - 1].isActive = true;
+      }
+      return newTabs;
+    });
   }
 
+  useEffect(() => {
+    const handler = () => {
+      const activeTab = tabsRef.current.find(tab => tab.isActive);
+      if (activeTab) {
+        closeTab(activeTab.id);
+      }
+    };
+
+    const cleanup = (window as any).api?.onCloseActiveTab(handler);
+    return cleanup;
+  }, []);
+
   const [tabs, setTabs] = useState<Tab[]>([
-    { id: "1", url: "https://example.com", isActive: false},
-    { id: "2", url: "https://github.com", isActive: true },
+    { id: "1Kw345fg178", url: "https://example.com", isActive: false},
+    { id: "2witsnghfiw", url: "https://github.com", isActive: true },
   ]);
+
+  // Keep a ref to always have the current tabs
+  const tabsRef = useRef(tabs);
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
 
   const [isDarkTheme, setIsDarkTheme] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
@@ -104,6 +136,15 @@ function App() {
     }
   }
 
+  const [AddressBarValue, setAddressBarValue] = useState("");
+
+  useEffect(() => {
+    const activeTab = tabs.find(t => t.isActive);
+    if (activeTab) {
+      setAddressBarValue(activeTab.url);
+    }
+  }, [tabs]);
+  
 
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
@@ -169,7 +210,8 @@ function App() {
           <input 
             type="text" 
             placeholder="Ask anything or navigate..."
-            defaultValue={tabs.find(t => t.isActive)?.url || ""} 
+            value={AddressBarValue} 
+            onChange={(e) => setAddressBarValue(e.target.value)}
             className="address-input" 
           />
           <div className="address-actions">

@@ -2,6 +2,32 @@ import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
 
+function attachShortcutHandler(contents) {
+  contents.on("before-input-event", function (event, input) {
+    if (input.type === "keyDown" && input.control) {
+      if (input.key.toLowerCase() === "r") {
+        event.preventDefault();
+        BrowserWindow.getAllWindows()[0]?.webContents.send(
+          "browser:reload-active-tab"
+        );
+      }
+      if (input.key.toLowerCase() === "t") {
+        event.preventDefault();
+        BrowserWindow.getAllWindows()[0]?.webContents.send(
+          "browser:new-tab"
+        );
+      }
+      if (input.key.toLowerCase() === "w") {
+        event.preventDefault();
+        BrowserWindow.getAllWindows()[0]?.webContents.send(
+          "browser:close-active-tab"
+        );
+      }
+    }
+  });
+}
+
+
 function createWindow() {
     const win = new BrowserWindow({
         width: 1200,
@@ -17,24 +43,14 @@ function createWindow() {
         }
     });
 
+    attachShortcutHandler(win.webContents);
+
     win.removeMenu();
 
     win.loadURL("http://localhost:5173");
   
     app.on("web-contents-created", function (_event, contents) {
-      contents.on("before-input-event", function (event, input) {
-        if (
-          input.type === "keyDown" &&
-          input.control &&
-          input.key.toLowerCase() === "r"
-        ) {
-          event.preventDefault();
-
-          BrowserWindow.getAllWindows()[0]?.webContents.send(
-            "browser:reload-active-tab"
-          );
-        }
-      });
+        attachShortcutHandler(contents);
     });
 }
 

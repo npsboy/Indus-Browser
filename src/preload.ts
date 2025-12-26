@@ -23,12 +23,22 @@ function onReloadActiveTab(callback: () => void) {
   ipcRenderer.on("browser:reload-active-tab", callback);
 }
 
+function onNewTab(callback: () => void) {
+  ipcRenderer.on("browser:new-tab", callback);
+  return () => ipcRenderer.removeListener("browser:new-tab", callback);
+}
 
+function onCloseActiveTab(callback: () => void) {
+  ipcRenderer.on("browser:close-active-tab", callback);
+  return () => ipcRenderer.removeListener("browser:close-active-tab", callback);
+}
 
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
     maximizeWindow,
     closeWindow,
-    onReloadActiveTab
+    onReloadActiveTab,
+    onNewTab,
+    onCloseActiveTab
 });
