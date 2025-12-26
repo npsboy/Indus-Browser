@@ -70,25 +70,37 @@ function App() {
     }
   }, []);
 
+  function handleReloadActiveTab() {
+    console.log("Reload active tab event received in App.tsx");
+    const activeWebview = document.querySelector('webview[style*="display: flex"]') as any;
+    if (activeWebview) {
+      activeWebview.reload();
+    }
+  }
+
+  useEffect(() => {
+    (window as any).api?.onReloadActiveTab(handleReloadActiveTab);
+  }, []);
+
   function toggleTheme() {
     setIsDarkTheme(!isDarkTheme);
   }
 
   function handleMinimize() {
-    if (window.electronAPI?.minimizeWindow) {
-      window.electronAPI.minimizeWindow();
+    if (window.api?.minimizeWindow) {
+      window.api.minimizeWindow();
     }
   }
 
   function handleMaximize() {
-    if (window.electronAPI?.maximizeWindow) {
-      window.electronAPI.maximizeWindow();
+    if (window.api?.maximizeWindow) {
+      window.api.maximizeWindow();
     }
   }
 
   function handleClose() {
-    if (window.electronAPI?.closeWindow) {
-      window.electronAPI.closeWindow();
+    if (window.api?.closeWindow) {
+      window.api.closeWindow();
     }
   }
 
@@ -148,7 +160,7 @@ function App() {
         <div className="nav-controls">
           <button className="nav-button"><img src={backIcon} alt="Back" /></button>
           <button className="nav-button"><img src={forwardIcon} alt="Forward" /></button>
-          <button className="nav-button"><img src={refreshIcon} alt="Refresh" /></button>
+          <button className="nav-button" onClick={handleReloadActiveTab}><img src={refreshIcon} alt="Refresh" /></button>
         </div>
 
         {/* Address Bar */}

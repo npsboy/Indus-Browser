@@ -18,12 +18,17 @@ function closeWindow() {
     ipcRenderer.send('close-window');
 }
 
-contextBridge.exposeInMainWorld('api', {
-    ping: ping
-});
+function onReloadActiveTab(callback: () => void) {
+    console.log("Setting up reload active tab listener in preload");
+  ipcRenderer.on("browser:reload-active-tab", callback);
+}
 
-contextBridge.exposeInMainWorld('electronAPI', {
+
+
+contextBridge.exposeInMainWorld('api', {
+    ping: ping,
     minimizeWindow,
     maximizeWindow,
-    closeWindow
+    closeWindow,
+    onReloadActiveTab
 });

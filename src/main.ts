@@ -3,24 +3,41 @@ import path from "path";
 import { ipcMain } from "electron";
 
 function createWindow() {
-  const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    titleBarStyle: "hidden",
+    const win = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        titleBarStyle: "hidden",
 
-    webPreferences: {
-        preload: path.join(__dirname, "preload.js"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        webviewTag: true
+        webPreferences: {
+            preload: path.join(__dirname, "preload.js"),
+            contextIsolation: true,
+            nodeIntegration: false,
+            webviewTag: true
 
-    }
-  });
+        }
+    });
 
-  win.removeMenu();
+    win.removeMenu();
 
-  win.loadURL("http://localhost:5173");
+    win.loadURL("http://localhost:5173");
+  
+    app.on("web-contents-created", function (_event, contents) {
+      contents.on("before-input-event", function (event, input) {
+        if (
+          input.type === "keyDown" &&
+          input.control &&
+          input.key.toLowerCase() === "r"
+        ) {
+          event.preventDefault();
+
+          BrowserWindow.getAllWindows()[0]?.webContents.send(
+            "browser:reload-active-tab"
+          );
+        }
+      });
+    });
 }
+
 
 ipcMain.handle('ping', async () => {
     return 'pong';
@@ -48,3 +65,5 @@ ipcMain.on('close-window', (event) => {
 });
 
 app.whenReady().then(createWindow);
+
+

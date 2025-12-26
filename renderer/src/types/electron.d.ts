@@ -1,4 +1,4 @@
-export interface ElectronAPI {
+export interface api {
   minimizeWindow: () => void;
   maximizeWindow: () => void;
   closeWindow: () => void;
