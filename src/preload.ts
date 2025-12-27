@@ -1,6 +1,5 @@
 import {ipcRenderer, contextBridge} from 'electron';
 
-console.log("Preload script loaded");
 
 function ping(){
     return ipcRenderer.invoke('ping');
@@ -19,7 +18,6 @@ function closeWindow() {
 }
 
 function onReloadActiveTab(callback: () => void) {
-    console.log("Setting up reload active tab listener in preload");
   ipcRenderer.on("browser:reload-active-tab", callback);
 }
 

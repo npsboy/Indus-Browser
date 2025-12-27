@@ -41,6 +41,11 @@ function App() {
       };
       return [...currentTabs.map(tab => ({ ...tab, isActive: false })), newTab];
     });
+    setAddressBarValue("");
+    const addressInput = document.querySelector('.address-input') as HTMLInputElement;
+    if (addressInput) {
+      addressInput.focus();
+    }
   }
 
   useEffect(() => {
@@ -86,9 +91,94 @@ function App() {
     tabsRef.current = tabs;
   }, [tabs]);
 
+  const webviewRefs = useRef<Map<string, HTMLWebViewElement>>(new Map());
+  //maps tab id to webview element inside .current
+
+  useEffect(() => {
+    const currentRefs = webviewRefs.current;
+    
+    const handlers = new Map<string, { navigate: (e: any) => void; navigateInPage: (e: any) => void; finishLoad: () => void }>();
+
+    tabs.forEach((tab) => {
+      const el = currentRefs.get(tab.id);
+      if (el) {
+        const navigateHandler = (e: any) => {
+          updateTabUrl(tab.id, e.url);
+        };
+        const navigateInPageHandler = (e: any) => {
+          updateTabUrl(tab.id, e.url);
+        };
+        const finishLoadHandler = () => {
+          updateTabUrl(tab.id, (el as any).getURL());
+        };
+
+        el.addEventListener('did-navigate', navigateHandler);
+        el.addEventListener('did-navigate-in-page', navigateInPageHandler);
+        el.addEventListener('did-finish-load', finishLoadHandler);
+
+        handlers.set(tab.id, {
+          navigate: navigateHandler,
+          navigateInPage: navigateInPageHandler,
+          finishLoad: finishLoadHandler
+        });
+      }
+    });
+
+    return () => {
+      tabs.forEach((tab) => {
+        const el = currentRefs.get(tab.id);
+        const h = handlers.get(tab.id);
+        if (el && h) {
+          el.removeEventListener('did-navigate', h.navigate);
+          el.removeEventListener('did-navigate-in-page', h.navigateInPage);
+          el.removeEventListener('did-finish-load', h.finishLoad);
+        }
+      });
+    };
+  }, [tabs]);
+
   const [isDarkTheme, setIsDarkTheme] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
   const [platform, setPlatform] = useState<'win32' | 'darwin' | 'linux'>('win32');
+  const [tabWidth, setTabWidth] = useState(240);
+
+  useEffect(() => {
+    const calculateTabWidth = () => {
+      const windowWidth = window.innerWidth;
+      let reservedSpace = 0;
+      
+      // Padding (6px left + 6px right)
+      reservedSpace += 12;
+      
+      // New tab button (approx 40px)
+      reservedSpace += 40;
+
+      // Platform specific controls
+      if (platform === 'darwin') {
+        reservedSpace += 80; // ~72px + buffer
+      } else if (platform === 'win32') {
+        reservedSpace += 150; // ~138px + buffer
+      }
+
+      // Extra safety buffer
+      reservedSpace += 20;
+
+      // Gaps between tabs (2px each)
+      const totalGaps = Math.max(0, tabs.length - 1) * 2;
+      
+      const availableWidth = windowWidth - reservedSpace - totalGaps;
+      
+      if (tabs.length > 0) {
+        const widthPerTab = availableWidth / tabs.length;
+        // Clamp: Max 240px, Min 30px
+        setTabWidth(Math.min(240, Math.max(3, widthPerTab)));
+      }
+    };
+
+    calculateTabWidth();
+    window.addEventListener('resize', calculateTabWidth);
+    return () => window.removeEventListener('resize', calculateTabWidth);
+  }, [tabs.length, platform]);
 
   useEffect(() => {
     // Detect platform
@@ -103,7 +193,6 @@ function App() {
   }, []);
 
   function handleReloadActiveTab() {
-    console.log("Reload active tab event received in App.tsx");
     const activeWebview = document.querySelector('webview[style*="display: flex"]') as any;
     if (activeWebview) {
       activeWebview.reload();
@@ -141,10 +230,70 @@ function App() {
   useEffect(() => {
     const activeTab = tabs.find(t => t.isActive);
     if (activeTab) {
-      setAddressBarValue(activeTab.url);
+      if (activeTab.url !== "https://www.google.com/"){
+        setAddressBarValue(activeTab.url);
+      } else {
+        setAddressBarValue("");
+      }
     }
   }, [tabs]);
   
+  function handleUserAddressBarInput(newValue: string) {
+    (document.activeElement as HTMLElement)?.blur();
+    if (!(newValue.startsWith("http://") || newValue.startsWith("https://"))) {
+      newValue = "https://www.google.com/search?q=" + encodeURIComponent(newValue);
+    }
+    setAddressBarValue(newValue);
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.isActive ? { ...tab, url: newValue } : tab
+      )
+    );
+  }
+
+  function updateTabUrl(tabId: string, newUrl: string) {
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, url: newUrl } : tab
+      )
+    );
+    // Update address bar if this is the active tab
+    const activeTab = tabsRef.current.find(t => t.isActive);
+    if (activeTab && activeTab.id === tabId) {
+      setAddressBarValue(newUrl);
+    }
+  }
+
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const activeTab = tabs.find(tab => tab.isActive);
+    if (activeTab) {
+      setActiveTabId(activeTab.id);
+    } else {
+      setActiveTabId(null);
+    }
+  }, [tabs]);
+
+
+  function goBack() {
+    if (!activeTabId) return;
+
+    const webview = webviewRefs.current.get(activeTabId);
+    if (webview && (webview as any).canGoBack()) {
+      (webview as any).goBack();
+    }
+  }
+
+  function goForward() {
+    if (!activeTabId) return;
+
+    const webview = webviewRefs.current.get(activeTabId);
+    if (webview && (webview as any).canGoForward()) {
+      (webview as any).goForward();
+    }
+  }
+
 
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
@@ -164,6 +313,7 @@ function App() {
             key={tab.id}
             onClick={() => activateTab(tab.id)}
             className={`tab ${tab.isActive ? "active" : ""}`}
+            style={{ width: `${tabWidth}px` }}
           >
             <img src={favicon} alt="" className="tab-favicon" />
             <span className="tab-title">
@@ -199,8 +349,8 @@ function App() {
       <div className="toolbar">
         {/* Navigation Controls */}
         <div className="nav-controls">
-          <button className="nav-button"><img src={backIcon} alt="Back" /></button>
-          <button className="nav-button"><img src={forwardIcon} alt="Forward" /></button>
+          <button className="nav-button" onClick={goBack}><img src={backIcon} alt="Back" /></button>
+          <button className="nav-button" onClick={goForward}><img src={forwardIcon} alt="Forward" /></button>
           <button className="nav-button" onClick={handleReloadActiveTab}><img src={refreshIcon} alt="Refresh" /></button>
         </div>
 
@@ -213,6 +363,12 @@ function App() {
             value={AddressBarValue} 
             onChange={(e) => setAddressBarValue(e.target.value)}
             className="address-input" 
+            onBlur={(e) => handleUserAddressBarInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleUserAddressBarInput(e.currentTarget.value);
+              }
+            }}
           />
           <div className="address-actions">
             <button className="address-action" title="Bookmark">
@@ -252,6 +408,13 @@ function App() {
       <div className="webview-container">
         {tabs.map((tab) => (
           <webview
+            ref={(el) => {
+              if (el) {
+                webviewRefs.current.set(tab.id, el);
+              } else {
+                webviewRefs.current.delete(tab.id);
+              }
+            }}
             key={tab.id}
             src={tab.url}
             style={{ 
