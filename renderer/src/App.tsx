@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, use } from "react";
 import "./App.css";
 import logo from "./assets/logos/Logo-White.png";
 import favicon from "./assets/logos/Favicon.png";
@@ -14,13 +14,17 @@ import minimizeIcon from "./assets/Icons/Minimize-Grey.png";
 import maximizeIcon from "./assets/Icons/Maximize-Grey.png";
 import closeIcon from "./assets/Icons/Close-Grey.png";
 import profilePic from "./assets/Images/Profile-Pictures/Profile-Picture-1.jpg";
+import loadingAnimation from "./assets/Icons/loading-animation.gif";
 
 function App() {
 
   type Tab = {
     id: string;
     url: string;
+    title?: string;
     isActive: boolean;
+    faviconUrl?: string | null;
+    isLoading?: boolean;
   };
 
   function activateTab(targetId: string) {
@@ -37,7 +41,10 @@ function App() {
       const newTab: Tab = {
         id: crypto.randomUUID(),
         url: newUrl,
-        isActive: true
+        title: "New Tab",
+        isActive: true,
+        faviconUrl: null,
+        isLoading: true
       };
       return [...currentTabs.map(tab => ({ ...tab, isActive: false })), newTab];
     });
@@ -81,8 +88,8 @@ function App() {
   }, []);
 
   const [tabs, setTabs] = useState<Tab[]>([
-    { id: "1Kw345fg178", url: "https://example.com", isActive: false},
-    { id: "2witsnghfiw", url: "https://github.com", isActive: true },
+    { id: "1Kw345fg178", url: "https://example.com", isActive: false, title: "Example" },
+    { id: "2witsnghfiw", url: "https://github.com", isActive: true, title: "GitHub" },
   ]);
 
   // Keep a ref to always have the current tabs
@@ -94,14 +101,42 @@ function App() {
   const webviewRefs = useRef<Map<string, HTMLWebViewElement>>(new Map());
   //maps tab id to webview element inside .current
 
+  const closeContextMenuRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     const currentRefs = webviewRefs.current;
     
-    const handlers = new Map<string, { navigate: (e: any) => void; navigateInPage: (e: any) => void; finishLoad: () => void }>();
+    const handlers = new Map<string, { 
+      domReady: () => void;
+      navigate: (e: any) => void; 
+      navigateInPage: (e: any) => void; 
+      finishLoad: () => void;
+      startLoading: () => void;
+      newWindow: (e: any) => void;
+      titleUpdated: (e: any) => void;
+      contextMenu: (e: any) => void;
+    }>();
 
     tabs.forEach((tab) => {
       const el = currentRefs.get(tab.id);
       if (el) {
+
+
+        const domReadyHandler = () => {
+          (el as any).setWindowOpenHandler((details: any) => {
+            addTab(details.url);
+            return { action: "deny" };
+          });
+        }
+
+        const startLoadingHandler = () => {
+          setTabs((currentTabs) =>
+            currentTabs.map((t) =>
+              t.id === tab.id ? { ...t, isLoading: true } : t
+            )
+          );
+        };
+
         const navigateHandler = (e: any) => {
           updateTabUrl(tab.id, e.url);
         };
@@ -110,16 +145,132 @@ function App() {
         };
         const finishLoadHandler = () => {
           updateTabUrl(tab.id, (el as any).getURL());
+          setTabs((currentTabs) =>
+            currentTabs.map((t) =>
+              t.id === tab.id ? { ...t, isLoading: false } : t
+            )
+          );
         };
 
+        function newWindowHandler(e: any) {
+          alert("Opening new windows is disabled in this browser.");
+          e.preventDefault();
+          addTab(e.url);
+        }
+
+        const titleUpdatedHandler = (e: any) => {
+          setTabs((currentTabs) =>
+            currentTabs.map((t) =>
+              t.id === tab.id ? { ...t, title: e.title || "Untitled" } : t
+            )
+          );
+        };
+
+        const contextMenuHandler = (e: any) => {
+          e.preventDefault();
+          
+          // Remove any existing menu first
+          if (closeContextMenuRef.current) {
+            closeContextMenuRef.current();
+          }
+
+          const { x, y, linkURL } = e.params;
+
+          // Create overlay to catch clicks outside
+          const overlay = document.createElement('div');
+          overlay.style.position = 'fixed';
+          overlay.style.top = '0';
+          overlay.style.left = '0';
+          overlay.style.width = '100vw';
+          overlay.style.height = '100vh';
+          overlay.style.zIndex = '9999';
+          overlay.style.background = 'transparent';
+
+          const menu = document.createElement('div');
+          menu.className = 'context-menu';
+          menu.style.left = `${x}px`;
+          menu.style.top = `${y}px`;
+          menu.style.zIndex = '10000';
+
+          const removeMenu = () => {
+            if (document.body.contains(overlay)) {
+              document.body.removeChild(overlay);
+            }
+            if (document.body.contains(menu)) {
+              document.body.removeChild(menu);
+            }
+            closeContextMenuRef.current = null;
+          };
+
+          closeContextMenuRef.current = removeMenu;
+
+          // Close on click outside (clicking the overlay)
+          overlay.addEventListener('mousedown', () => {
+            removeMenu();
+          });
+          
+          // Prevent default context menu on overlay and close custom menu
+          overlay.addEventListener('contextmenu', (evt) => {
+             evt.preventDefault();
+             removeMenu();
+          });
+
+          const menuItems: { label: string; action: () => void; separator?: boolean }[] = [];
+
+          if (linkURL) {
+            menuItems.push({
+              label: 'Open link in new tab',
+              action: () => addTab(linkURL),
+              separator: true
+            });
+          }
+
+          menuItems.push({
+            label: 'Inspect',
+            action: () => {
+              if (el) {
+                (el as any).openDevTools();
+              }
+            }
+          });
+
+          menuItems.forEach((item) => {
+            const menuItem = document.createElement('div');
+            menuItem.textContent = item.label;
+            menuItem.className = `context-menu-item${item.separator ? ' separator' : ''}`;
+
+            menuItem.addEventListener('click', (clickEvent) => {
+              clickEvent.stopPropagation();
+              item.action();
+              removeMenu();
+            });
+
+            menu.appendChild(menuItem);
+          });
+
+          document.body.appendChild(overlay);
+          document.body.appendChild(menu);
+        };
+
+        el.addEventListener('did-start-loading', startLoadingHandler);
         el.addEventListener('did-navigate', navigateHandler);
         el.addEventListener('did-navigate-in-page', navigateInPageHandler);
         el.addEventListener('did-finish-load', finishLoadHandler);
+        el.addEventListener('new-window', newWindowHandler);
+        el.addEventListener('page-title-updated', titleUpdatedHandler);
+        el.addEventListener('context-menu', contextMenuHandler);
+
+        el.addEventListener('dom-ready', domReadyHandler);
 
         handlers.set(tab.id, {
+          startLoading: startLoadingHandler,
           navigate: navigateHandler,
           navigateInPage: navigateInPageHandler,
-          finishLoad: finishLoadHandler
+          finishLoad: finishLoadHandler,
+          newWindow: newWindowHandler,
+          titleUpdated: titleUpdatedHandler,
+          contextMenu: contextMenuHandler,
+          domReady: domReadyHandler
         });
       }
     });
@@ -129,9 +280,13 @@ function App() {
         const el = currentRefs.get(tab.id);
         const h = handlers.get(tab.id);
         if (el && h) {
+          el.removeEventListener('did-start-loading', h.startLoading);
           el.removeEventListener('did-navigate', h.navigate);
           el.removeEventListener('did-navigate-in-page', h.navigateInPage);
           el.removeEventListener('did-finish-load', h.finishLoad);
+          el.removeEventListener('new-window', h.newWindow);
+          el.removeEventListener('page-title-updated', h.titleUpdated);
+          el.removeEventListener('context-menu', h.contextMenu);
         }
       });
     };
@@ -262,6 +417,12 @@ function App() {
     if (activeTab && activeTab.id === tabId) {
       setAddressBarValue(newUrl);
     }
+
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) => ({
+        ...tab, faviconUrl: getFaviconUrl(tab.url)
+      })))
+
   }
 
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -295,6 +456,17 @@ function App() {
   }
 
 
+
+  function getFaviconUrl(pageUrl: string) {
+    try {
+      var u = new URL(pageUrl);
+      return u.origin + "/favicon.ico";
+    } catch {
+      return null;
+    }
+  }
+
+
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
       {/* Tab Bar */}
@@ -308,19 +480,38 @@ function App() {
           </div>
         )}
 
-        {tabs.map((tab) => (
-          <div
+        {tabs.map((tab, idx) => (
+            <div
             key={tab.id}
             onClick={() => activateTab(tab.id)}
             className={`tab ${tab.isActive ? "active" : ""}`}
             style={{ width: `${tabWidth}px` }}
-          >
-            <img src={favicon} alt="" className="tab-favicon" />
+            >
+            {tab.isLoading ? (
+              <img src={loadingAnimation} className="loading-animation" />
+            ) : (
+              <img
+              src={tab.faviconUrl ? tab.faviconUrl : favicon}
+              alt=""
+              className="tab-favicon"
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).src = favicon;
+              }}
+              />
+            )}
             <span className="tab-title">
-              {tab.url.replace(/^https?:\/\/(www\.)?/, '').split('/')[0]}
+              {tab.title || tab.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}
             </span>
-            <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}>×</span>
-          </div>
+            <span
+              className="tab-close"
+              onClick={(e) => {
+              e.stopPropagation();
+              closeTab(tab.id);
+              }}
+            >
+              ×
+            </span>
+            </div>
         ))}
         <button 
           onClick={() => addTab("https://google.com")}
@@ -421,6 +612,7 @@ function App() {
               width: "100%", height: "100%",
               display: tab.isActive ? "flex" : "none"
             }}
+            partition="persist:default"
           />  
         ))}    
       </div>
