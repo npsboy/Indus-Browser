@@ -19,13 +19,13 @@ function attachShortcutHandler(contents) {
             event.preventDefault();
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:close-active-tab");
             break;
-        case "+":
-            console.log("Zoom In");
+        case "=":
             const webContents = BrowserWindow.getAllWindows()[0]?.webContents;
             if (webContents) {
                 let zoomLevel = webContents.getZoomLevel();
                 webContents.setZoomLevel(zoomLevel + 0.5);
             }
+            break;
         case "-":
             const wc = BrowserWindow.getAllWindows()[0]?.webContents;
             if (wc) {
@@ -58,6 +58,8 @@ function createWindow() {
 
     attachShortcutHandler(win.webContents);
 
+    win.webContents.setVisualZoomLevelLimits(1, 3);
+
     win.removeMenu();
 
     win.loadURL("http://localhost:5173");
@@ -65,6 +67,7 @@ function createWindow() {
     app.on("web-contents-created", function (_event, contents) {
         attachShortcutHandler(contents);
     });
+    
 }
 
 

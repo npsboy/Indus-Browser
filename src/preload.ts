@@ -31,6 +31,8 @@ function onCloseActiveTab(callback: () => void) {
   return () => ipcRenderer.removeListener("browser:close-active-tab", callback);
 }
 
+
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,

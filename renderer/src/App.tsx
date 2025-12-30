@@ -294,8 +294,53 @@ function App() {
 
   const [isDarkTheme, setIsDarkTheme] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
+  const [showAssistant, setShowAssistant] = useState(false);
+  const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
+  const [showAssistantMenu, setShowAssistantMenu] = useState(false);
   const [platform, setPlatform] = useState<'win32' | 'darwin' | 'linux'>('win32');
   const [tabWidth, setTabWidth] = useState(240);
+
+  // Sidebar resizing state
+  const [sidebarWidth, setSidebarWidth] = useState(350);
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizingSidebar) {
+        const newWidth = window.innerWidth - e.clientX;
+        // Clamp width between 250px and 800px
+        if (newWidth > 250 && newWidth < 800) {
+          setSidebarWidth(newWidth);
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingSidebar(false);
+    };
+
+    if (isResizingSidebar) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'col-resize';
+    } else {
+      document.body.style.cursor = '';
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+    };
+  }, [isResizingSidebar]);
+
+  const handleInputResize = () => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+    }
+  };
 
   useEffect(() => {
     const calculateTabWidth = () => {
@@ -469,6 +514,21 @@ function App() {
 
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
+      {/* Overlay to capture mouse events during resizing, preventing webview interference */}
+      {isResizingSidebar && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            zIndex: 9999,
+            cursor: "col-resize",
+          }}
+        />
+      )}
+
       {/* Tab Bar */}
       <div className="tab-bar">
         {/* Window Controls - Mac (left side) */}
@@ -577,7 +637,13 @@ function App() {
             <img src={workflowIcon} alt="Workflows" />
             <span>Workflows</span>
           </button>
-          <button className="icon-button" title="Assistant"><img src={logo} alt="" className="assistant-icon" />Assistant</button>
+          <button 
+            className={`icon-button ${showAssistant ? "active" : ""}`} 
+            title="Assistant" 
+            onClick={() => setShowAssistant(!showAssistant)}
+          >
+            <img src={logo} alt="" className="assistant-icon" />Assistant
+          </button>
           <button className="icon-button"><img src={extensionIcon} alt="Extensions" /></button>
           <div style={{ position: "relative" }}>
             <button className="icon-button" onClick={() => setShowMenu(!showMenu)}>
@@ -609,12 +675,82 @@ function App() {
             key={tab.id}
             src={tab.url}
             style={{ 
-              width: "100%", height: "100%",
+              flex: 1, height: "100%",
               display: tab.isActive ? "flex" : "none"
             }}
             partition="persist:default"
           />  
-        ))}    
+        ))}
+
+        {showAssistant && (
+          <div 
+            className="assistant-sidebar" 
+            style={{ width: `${sidebarWidth}px` }}
+          >
+            <div 
+              className="sidebar-resizer"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizingSidebar(true);
+              }}
+            />
+            <div className="assistant-empty-state">
+              <img src={logo} alt="Agent" className="agent-logo-large" />
+              <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
+            </div>
+            
+            <div className="assistant-input-container">
+              <div className="assistant-input-row">
+                <textarea 
+                  ref={textareaRef}
+                  placeholder={assistantMode === 'agent' ? "Assign any task..." : "Ask anything..."} 
+                  className="assistant-text-input" 
+                  autoFocus 
+                  rows={1}
+                  onInput={handleInputResize}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      // Handle send logic here
+                    }
+                  }}
+                />
+                <button className="assistant-send-button">➤</button>
+              </div>
+              <div className="assistant-input-footer">
+                <button className="assistant-attach-button" title="Attach file">
+                  <span>📎</span>
+                </button>
+                
+                <div style={{ position: 'relative' }}>
+                  <button 
+                    className="assistant-mode-button" 
+                    onClick={() => setShowAssistantMenu(!showAssistantMenu)}
+                  >
+                    {assistantMode === 'agent' ? 'Agent' : 'Chat'} <span>⌄</span>
+                  </button>
+                  
+                  {showAssistantMenu && (
+                    <div className="assistant-mode-menu">
+                      <div 
+                        className="assistant-mode-item" 
+                        onClick={() => { setAssistantMode('agent'); setShowAssistantMenu(false); }}
+                      >
+                        Agent
+                      </div>
+                      <div 
+                        className="assistant-mode-item" 
+                        onClick={() => { setAssistantMode('chat'); setShowAssistantMenu(false); }}
+                      >
+                        Chat
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
