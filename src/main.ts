@@ -99,44 +99,55 @@ ipcMain.on('close-window', (event) => {
 
 app.whenReady().then(createWindow);
 
-const cmd = decideAction("please open a new tab");
 
-
-
-if (cmd.type === "agent:new-tab") {
-    BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
-}
-else if (cmd.type === "agent:navigate") {
-    BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
-}
-else if (cmd.type === "agent:click") {
+async function takeScreenshot() {
     const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-    wc.sendInputEvent({
-        type: 'mouseDown',
-        x: cmd.x,
-        y: cmd.y,
-        button: 'left',
-        clickCount: 1
-    });
-    wc.sendInputEvent({
-        type: 'mouseUp',
-        x: cmd.x,
-        y: cmd.y,
-        button: 'left',
-        clickCount: 1
-    });
-}
-else if (cmd.type === "agent:scroll") {
-    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-    wc.sendInputEvent({
-        type: 'mouseWheel',
-        x: cmd.x,
-        y: cmd.y,
-        deltaY: cmd.deltaY
-    });
-}
-else {
-    BrowserWindow.getAllWindows()[0]?.webContents.send(cmd.type);
+    if (!wc) return null;
+    const image = await wc.capturePage();
+    const resizeImage = image.resize({ width: 1280 });
+    const imageBase64 = resizeImage.toDataURL();
+    return imageBase64;
 }
 
+async function runAgent(){
+    const screenshot = await takeScreenshot();
+    const cmd = decideAction("please open a new tab", screenshot);
 
+
+    if (cmd.type === "agent:new-tab") {
+        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
+    }
+    else if (cmd.type === "agent:navigate") {
+        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
+    }
+    else if (cmd.type === "agent:click") {
+        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+        wc.sendInputEvent({
+            type: 'mouseDown',
+            x: cmd.x,
+            y: cmd.y,
+            button: 'left',
+            clickCount: 1
+        });
+        wc.sendInputEvent({
+            type: 'mouseUp',
+            x: cmd.x,
+            y: cmd.y,
+            button: 'left',
+            clickCount: 1
+        });
+    }
+    else if (cmd.type === "agent:scroll") {
+        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+        wc.sendInputEvent({
+            type: 'mouseWheel',
+            x: cmd.x,
+            y: cmd.y,
+            deltaY: cmd.deltaY
+        });
+    }
+    else {
+        BrowserWindow.getAllWindows()[0]?.webContents.send(cmd.type);
+    }
+
+}
