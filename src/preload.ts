@@ -31,7 +31,25 @@ function onCloseActiveTab(callback: () => void) {
   return () => ipcRenderer.removeListener("browser:close-active-tab", callback);
 }
 
+function onAgentNavigate(callback: (_event: any, url: string) => void) {
+  ipcRenderer.on("agent:navigate", callback);
+  return () => ipcRenderer.removeListener("agent:navigate", callback);
+}
 
+function onAgentNewTab(callback: (_event: any, url?: string) => void) {
+  ipcRenderer.on("agent:new-tab", callback);
+  return () => ipcRenderer.removeListener("agent:new-tab", callback);
+}
+
+function onAgentReloadActiveTab(callback: () => void) {
+  ipcRenderer.on("agent:reload-active-tab", callback);
+  return () => ipcRenderer.removeListener("agent:reload-active-tab", callback);
+}
+
+function onAgentCloseActiveTab(callback: () => void) {
+  ipcRenderer.on("agent:close-active-tab", callback);
+  return () => ipcRenderer.removeListener("agent:close-active-tab", callback);
+}
 
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
@@ -40,5 +58,8 @@ contextBridge.exposeInMainWorld('api', {
     closeWindow,
     onReloadActiveTab,
     onNewTab,
-    onCloseActiveTab
+    onCloseActiveTab,
+    onAgentNavigate,
+    onAgentNewTab,
+    onAgentReloadActiveTab
 });

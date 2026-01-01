@@ -512,6 +512,39 @@ function App() {
   }
 
 
+  useEffect(() => {
+    (window as any).api?.onAgentNavigate((_event: any, url: string) => {
+      if (activeTabId) {
+        updateTabUrl(activeTabId, url);
+      }
+    });
+  }, [activeTabId]);
+
+
+  useEffect(() => {
+    (window as any).api?.onAgentNewTab((_event: any, url?: string) => {
+      if (url) {
+        addTab(url);
+      } else {
+        addTab("https://www.google.com");
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    (window as any).api?.onAgentReloadActiveTab(() => {
+      handleReloadActiveTab();
+    });
+  }, []);
+
+  useEffect(() => {
+    (window as any).api?.onAgentCloseActiveTab(() => {
+      if (activeTabId) {
+        closeTab(activeTabId);
+      }
+    });
+  }, []);
+
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
       {/* Overlay to capture mouse events during resizing, preventing webview interference */}
@@ -678,7 +711,6 @@ function App() {
               flex: 1, height: "100%",
               display: tab.isActive ? "flex" : "none"
             }}
-            partition="persist:default"
           />  
         ))}
 

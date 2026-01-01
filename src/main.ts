@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
+import { decideAction } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -97,5 +98,45 @@ ipcMain.on('close-window', (event) => {
 });
 
 app.whenReady().then(createWindow);
+
+const cmd = decideAction("please open a new tab");
+
+
+
+if (cmd.type === "agent:new-tab") {
+    BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
+}
+else if (cmd.type === "agent:navigate") {
+    BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
+}
+else if (cmd.type === "agent:click") {
+    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+    wc.sendInputEvent({
+        type: 'mouseDown',
+        x: cmd.x,
+        y: cmd.y,
+        button: 'left',
+        clickCount: 1
+    });
+    wc.sendInputEvent({
+        type: 'mouseUp',
+        x: cmd.x,
+        y: cmd.y,
+        button: 'left',
+        clickCount: 1
+    });
+}
+else if (cmd.type === "agent:scroll") {
+    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+    wc.sendInputEvent({
+        type: 'mouseWheel',
+        x: cmd.x,
+        y: cmd.y,
+        deltaY: cmd.deltaY
+    });
+}
+else {
+    BrowserWindow.getAllWindows()[0]?.webContents.send(cmd.type);
+}
 
 
