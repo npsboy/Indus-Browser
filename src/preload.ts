@@ -1,5 +1,5 @@
 import {ipcRenderer, contextBridge} from 'electron';
-
+import { AgentCommand } from './agent/agent-api';
 
 function ping(){
     return ipcRenderer.invoke('ping');
@@ -61,5 +61,25 @@ contextBridge.exposeInMainWorld('api', {
     onCloseActiveTab,
     onAgentNavigate,
     onAgentNewTab,
-    onAgentReloadActiveTab
+    onAgentReloadActiveTab,
+    onAgentCloseActiveTab
+});
+
+contextBridge.exposeInMainWorld('agentapi', {
+    // For agent.ts to send commands to Main
+    sendAgentCommand: (cmd: AgentCommand) => {
+        return ipcRenderer.invoke('agent-command', cmd);
+    },
+    // For Main to send tasks to agent.ts
+    onAgentTask: (callback: (task: string, screenshot: string) => void) => {
+        const listener = (_event: any, task: string, screenshot: string) => {
+            callback(task, screenshot);
+        };
+        ipcRenderer.on('agent:execute-task', listener);
+        return () => ipcRenderer.removeListener('agent:execute-task', listener);
+    },
+    // For React to send tasks to agent.ts (via Main)
+    executeTask: (userPrompt: string) => {
+        return ipcRenderer.invoke('agent:execute-task-from-ui', userPrompt);
+    }
 });

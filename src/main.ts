@@ -1,7 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { decideAction } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -109,45 +108,69 @@ async function takeScreenshot() {
     return imageBase64;
 }
 
-async function runAgent(){
+// Function to send task to agent.ts in renderer
+async function executeAgentTask(userPrompt: string) {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return;
+    
     const screenshot = await takeScreenshot();
-    const cmd = decideAction("please open a new tab", screenshot);
+    win.webContents.send('agent:execute-task', userPrompt, screenshot);
+}
 
+// Handle when React UI wants to execute a task
+ipcMain.handle('agent:execute-task-from-ui', async (_event, userPrompt: string) => {
+    await executeAgentTask(userPrompt);
+});
 
+// Handle commands from agent.ts
+ipcMain.handle('agent-command', async (_event, cmd) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    
     if (cmd.type === "agent:new-tab") {
-        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
+        win?.webContents.send("agent:new-tab", cmd.url);
     }
     else if (cmd.type === "agent:navigate") {
-        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
+        win?.webContents.send("agent:navigate", cmd.url);
     }
     else if (cmd.type === "agent:click") {
-        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-        wc.sendInputEvent({
-            type: 'mouseDown',
-            x: cmd.x,
-            y: cmd.y,
-            button: 'left',
-            clickCount: 1
-        });
-        wc.sendInputEvent({
-            type: 'mouseUp',
-            x: cmd.x,
-            y: cmd.y,
-            button: 'left',
-            clickCount: 1
-        });
+        const wc = win?.webContents;
+        if (wc) {
+            wc.sendInputEvent({
+                type: 'mouseDown',
+                x: cmd.x,
+                y: cmd.y,
+                button: 'left',
+                clickCount: 1
+            });
+            wc.sendInputEvent({
+                type: 'mouseUp',
+                x: cmd.x,
+                y: cmd.y,
+                button: 'left',
+                clickCount: 1
+            });
+        }
     }
     else if (cmd.type === "agent:scroll") {
-        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-        wc.sendInputEvent({
-            type: 'mouseWheel',
-            x: cmd.x,
-            y: cmd.y,
-            deltaY: cmd.deltaY
-        });
+        const wc = win?.webContents;
+        if (wc) {
+            wc.sendInputEvent({
+                type: 'mouseWheel',
+                x: cmd.x,
+                y: cmd.y,
+                deltaX: 0,
+                deltaY: cmd.deltaY
+            });
+        }
     }
-    else {
-        BrowserWindow.getAllWindows()[0]?.webContents.send(cmd.type);
+    else if (cmd.type === "agent:screenshot") {
+        const screenshot = await takeScreenshot();
+        return screenshot;
     }
-
-}
+    else if (cmd.type === "agent:reload-active-tab") {
+        win?.webContents.send("agent:reload-active-tab");
+    }
+    else if (cmd.type === "agent:close-active-tab") {
+        win?.webContents.send("agent:close-active-tab");
+    }
+});

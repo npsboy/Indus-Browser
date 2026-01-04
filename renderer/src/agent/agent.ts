@@ -1,4 +1,4 @@
-import { AgentCommand } from "./agent-api";
+import { AgentCommand } from "../../../src/agent/agent-api";
 
 async function planTask(userPrompt: string) {
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
@@ -33,7 +33,8 @@ async function computerUse(taskGoal: string, screenshot: string) {
     return data;
 }
 
-export async function executeTask(userPrompt: string, screenshot: string) {
+// This function executes a task sent from Main process
+async function executeTask(userPrompt: string, screenshot: string | null) {
     const agentapi = (window as any).agentapi;
     
     if (!agentapi) {
@@ -43,26 +44,34 @@ export async function executeTask(userPrompt: string, screenshot: string) {
 
     console.log("Executing task:", userPrompt);
 
-    const aiDecision = await computerUse(userPrompt, screenshot);
-    console.log("AI Decision:", aiDecision);
+    // Use the AI to decide what to do
+    if (screenshot) {
+        const aiDecision = await computerUse(userPrompt, screenshot);
+        console.log("AI Decision:", aiDecision);
+    }
 
-    if (userPrompt.includes("new tab")) {
+    // Parse and execute - simple keyword matching for now:
+    if (userPrompt.toLowerCase().includes("new tab")) {
         await agentapi.sendAgentCommand({ type: "agent:new-tab" });
     }
-    else if (userPrompt.includes("close tab")) {
+    else if (userPrompt.toLowerCase().includes("close tab")) {
         await agentapi.sendAgentCommand({ type: "agent:close-active-tab" });
     }
-    else if (userPrompt.includes("reload")) {
+    else if (userPrompt.toLowerCase().includes("reload")) {
         await agentapi.sendAgentCommand({ type: "agent:reload-active-tab" });
     }
 }
 
 // Listen for tasks from Main process
 if (typeof window !== 'undefined') {
-    const agentapi = (window as any).agentapi;
-    if (agentapi?.onAgentTask) {
-        agentapi.onAgentTask((task: string, screenshot: string) => {
-            executeTask(task, screenshot);
-        });
-    }
+    window.addEventListener('DOMContentLoaded', () => {
+        const agentapi = (window as any).agentapi;
+        if (agentapi?.onAgentTask) {
+            agentapi.onAgentTask((task: string, screenshot: string) => {
+                executeTask(task, screenshot);
+            });
+        }
+    });
 }
+
+export { executeTask };

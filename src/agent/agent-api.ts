@@ -1,4 +1,4 @@
-export type AgentCommand = 
+export type AgentCommand =
   | { type: "agent:new-tab"; url?: string }
   | { type: "agent:navigate"; url: string }
   | { type: "agent:click"; x: number; y: number }
@@ -6,3 +6,4 @@ export type AgentCommand =
   | { type: "agent:screenshot" }
   | { type: "agent:close-active-tab" }
   | { type: "agent:reload-active-tab" };
+
