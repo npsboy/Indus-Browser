@@ -64,6 +64,25 @@ function App() {
     return cleanup;
   }, []);
 
+  // Set up agent task listener
+  useEffect(() => {
+    console.log('[App.tsx] Setting up agent task listener...');
+    const agentapi = (window as any).agentapi;
+    if (agentapi?.onAgentTask) {
+      console.log('[App.tsx] Agent task listener registered!');
+      const cleanup = agentapi.onAgentTask((task: string, screenshot: string) => {
+        console.log('[App.tsx] ========================================');
+        console.log('[App.tsx] RECEIVED TASK FROM MAIN PROCESS!');
+        console.log('[App.tsx] Task:', task);
+        console.log('[App.tsx] Screenshot received:', screenshot ? 'Yes' : 'No');
+        console.log('[App.tsx] ========================================');
+      });
+      return cleanup;
+    } else {
+      console.warn('[App.tsx] agentapi.onAgentTask not available!');
+    }
+  }, []);
+
 
   function closeTab(targetId: string) {
     setTabs((currentTabs) => {
@@ -743,11 +762,32 @@ function App() {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      // Handle send logic here
+                      const message = textareaRef.current?.value.trim();
+                      if (message) {
+                        console.log('[App.tsx] Sending message to agent:', message);
+                        (window as any).agentapi?.executeTask(message);
+                        if (textareaRef.current) {
+                          textareaRef.current.value = '';
+                          textareaRef.current.style.height = 'auto';
+                        }
+                      }
                     }
                   }}
                 />
-                <button className="assistant-send-button">➤</button>
+                <button 
+                  className="assistant-send-button"
+                  onClick={() => {
+                    const message = textareaRef.current?.value.trim();
+                    if (message) {
+                      console.log('[App.tsx] Sending message to agent:', message);
+                      (window as any).agentapi?.executeTask(message);
+                      if (textareaRef.current) {
+                        textareaRef.current.value = '';
+                        textareaRef.current.style.height = 'auto';
+                      }
+                    }
+                  }}
+                >➤</button>
               </div>
               <div className="assistant-input-footer">
                 <button className="assistant-attach-button" title="Attach file">

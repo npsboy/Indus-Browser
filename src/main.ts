@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
+import { executeTask } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -63,6 +64,9 @@ function createWindow() {
     win.removeMenu();
 
     win.loadURL("http://localhost:5173");
+
+    // Open DevTools by default for debugging
+    win.webContents.openDevTools();
   
     app.on("web-contents-created", function (_event, contents) {
         attachShortcutHandler(contents);
@@ -108,17 +112,22 @@ async function takeScreenshot() {
     return imageBase64;
 }
 
-// Function to send task to agent.ts in renderer
+// Function to send task to agent.ts (now in main process)
 async function executeAgentTask(userPrompt: string) {
     const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return;
+    if (!win) {
+        console.error('[Main Process] No window found');
+        return;
+    }
     
     const screenshot = await takeScreenshot();
-    win.webContents.send('agent:execute-task', userPrompt, screenshot);
+    // Call agent directly since it's now in the main process
+    await executeTask(userPrompt, screenshot, win);
 }
 
 // Handle when React UI wants to execute a task
 ipcMain.handle('agent:execute-task-from-ui', async (_event, userPrompt: string) => {
+    console.log('[Main Process] Received task from UI:', userPrompt);
     await executeAgentTask(userPrompt);
 });
 
