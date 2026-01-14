@@ -106,9 +106,10 @@ app.whenReady().then(createWindow);
 async function takeScreenshot() {
     const wc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!wc) return null;
+
     const image = await wc.capturePage();
-    const resizeImage = image.resize({ width: 1280 });
-    const imageBase64 = resizeImage.toDataURL();
+    const imageBase64 = image.toDataURL();
+
     return imageBase64;
 }
 

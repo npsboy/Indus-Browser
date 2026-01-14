@@ -121,6 +121,24 @@ function App() {
   //maps tab id to webview element inside .current
 
   const closeContextMenuRef = useRef<(() => void) | null>(null);
+  const [showCoordinates, setShowCoordinates] = useState(false);
+  const [mouseCoordinates, setMouseCoordinates] = useState({ x: 0, y: 0 });
+
+  // Live mouse tracking for coordinates display
+  useEffect(() => {
+    if (!showCoordinates) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // Calculate coordinates relative to the entire app, not just webview
+      setMouseCoordinates({ 
+        x: Math.round(e.clientX), 
+        y: Math.round(e.clientY) 
+      });
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, [showCoordinates]);
 
   useEffect(() => {
     const currentRefs = webviewRefs.current;
@@ -243,6 +261,14 @@ function App() {
               separator: true
             });
           }
+
+          menuItems.push({
+            label: 'Pointer Coordinates',
+            action: () => {
+              setMouseCoordinates({ x, y });
+              setShowCoordinates(true);
+            }
+          });
 
           menuItems.push({
             label: 'Inspect',
@@ -732,6 +758,34 @@ function App() {
             }}
           />  
         ))}
+
+        {showCoordinates && (
+          <div 
+            className="coordinates-display"
+            onClick={() => setShowCoordinates(false)}
+            style={{
+              position: 'absolute',
+              top: '20px',
+              right: '20px',
+              background: 'rgba(0, 0, 0, 0.85)',
+              color: 'white',
+              padding: '15px 20px',
+              borderRadius: '8px',
+              zIndex: 10001,
+              fontSize: '14px',
+              fontFamily: 'monospace',
+              cursor: 'pointer',
+              userSelect: 'text',
+              pointerEvents: 'none'
+            }}
+          >
+            <div>X: {mouseCoordinates.x}</div>
+            <div>Y: {mouseCoordinates.y}</div>
+            <div style={{ fontSize: '11px', marginTop: '8px', opacity: 0.7, pointerEvents: 'auto' }}>
+              Right-click to close
+            </div>
+          </div>
+        )}
 
         {showAssistant && (
           <div 

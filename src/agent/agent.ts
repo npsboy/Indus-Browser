@@ -1,5 +1,5 @@
 // Agent module - runs in Electron main process
-import { BrowserWindow, net } from "electron";
+import { BrowserWindow, net, screen, webContents as electronWebContents } from "electron";
 
 
 async function planTask(userPrompt: string) {
@@ -33,15 +33,17 @@ async function planTask(userPrompt: string) {
     }
 }
 
-async function computerUse(taskGoal: string, screenshot: string) {
-    console.log('[agent.ts] computerUse: Sending request...');
-    console.log('[agent.ts] computerUse: Goal:', taskGoal);
-    
-    // Ensure screenshot is in data URL format
+async function computerUse(taskGoal: string, screenshot: string, win: BrowserWindow) {
     const imageUrl = screenshot.startsWith('data:') 
         ? screenshot 
         : `data:image/png;base64,${screenshot}`;
     
+    const contentBounds = win.getContentBounds();
+    const display = screen.getDisplayMatching(win.getBounds());
+    const scaleFactor = display.scaleFactor || 1;
+    const scaledWidth = Math.round(contentBounds.width * scaleFactor);
+    const scaledHeight = Math.round(contentBounds.height * scaleFactor);
+
     try {
         const response = await net.fetch("https://indus-backend.tushar-vijayanagar.workers.dev/computer", {
             method: "POST",
@@ -50,10 +52,11 @@ async function computerUse(taskGoal: string, screenshot: string) {
             },
             body: JSON.stringify({
                 goal: taskGoal,
-                screenshot: imageUrl,  // Changed from screenshotBase64 to screenshot with data URL
+                imageUrl: imageUrl,
+                displayHeight: scaledHeight,
+                displayWidth: scaledWidth
             })
         });
-        
         
         if (!response.ok) {
             const errorText = await response.text();
@@ -62,9 +65,7 @@ async function computerUse(taskGoal: string, screenshot: string) {
         }
         
         const text = await response.text();
-        
         const data = JSON.parse(text);
-        console.log('[agent.ts] computerUse: Parsed response:', data);
         return data;
     } catch (error) {
         console.error('[agent.ts] computerUse: Fetch error:', error);
@@ -72,64 +73,122 @@ async function computerUse(taskGoal: string, screenshot: string) {
     }
 }
 
+async function getWebviewContainerRect(win: BrowserWindow): Promise<null | { left: number; top: number; width: number; height: number }> {
+    try {
+        const rect = await win.webContents.executeJavaScript(
+            `(() => {
+                const el = document.querySelector('.webview-container');
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return { left: r.left, top: r.top, width: r.width, height: r.height };
+            })()`,
+            true
+        );
+        if (!rect) return null;
+        return rect;
+    } catch (e) {
+        console.warn("[agent.ts] Failed to read .webview-container rect:", e);
+        return null;
+    }
+}
+
+function pickGuestWebContentsForWindow(win: BrowserWindow) {
+    const host = win.webContents;
+    const all = electronWebContents.getAllWebContents();
+    const guests = all.filter((wc: any) => wc?.hostWebContents === host);
+    // Prefer a focused guest if available, else any guest.
+    return (guests.find((wc: any) => typeof wc.isFocused === "function" && wc.isFocused()) ?? guests[0]) ?? null;
+}
+
 // Execute actions on the browser window
 async function executeAction(action: any, win: BrowserWindow) {
-    const wc = win.webContents;
-    
+    const hostWc = win.webContents;
+
+    const display = screen.getDisplayMatching(win.getBounds());
+    const scaleFactor = display.scaleFactor || 1;
+
+    // Model coords are in device pixels (because you told backend scaledWidth/Height),
+    // but Electron input expects DIP.
+    const dipX = Math.round(action.x / scaleFactor);
+    const dipY = Math.round(action.y / scaleFactor);
+
+    // Determine whether this point is inside the webview container in the *host page*
+    const rect = await getWebviewContainerRect(win);
+    const inWebviewContainer =
+        !!rect &&
+        dipX >= rect.left &&
+        dipY >= rect.top &&
+        dipX <= rect.left + rect.width &&
+        dipY <= rect.top + rect.height;
+
+    const guestWc = inWebviewContainer ? pickGuestWebContentsForWindow(win) : null;
+
+    // If sending to guest, translate host DIP -> guest-local DIP
+    const targetWc = guestWc ?? hostWc;
+    const localX = guestWc && rect ? Math.round(dipX - rect.left) : dipX;
+    const localY = guestWc && rect ? Math.round(dipY - rect.top) : dipY;
+
     if (action.type === "click") {
-        console.log('[agent.ts] Executing click at', action.x, action.y);
-        wc.sendInputEvent({
-            type: 'mouseDown',
-            x: action.x,
-            y: action.y,
-            button: 'left',
-            clickCount: 1
-        });
-        wc.sendInputEvent({
-            type: 'mouseUp',
-            x: action.x,
-            y: action.y,
-            button: 'left',
-            clickCount: 1
-        });
+        const button = (action.button ?? "left") as "left" | "middle" | "right";
+
+        try {
+            if (!win.isFocused()) win.focus();
+            targetWc.focus();
+            await new Promise((r) => setTimeout(r, 50));
+
+            targetWc.sendInputEvent({ type: "mouseMove", x: localX, y: localY });
+            await new Promise((r) => setTimeout(r, 25));
+
+            targetWc.sendInputEvent({ type: "mouseDown", x: localX, y: localY, button, clickCount: 1, modifiers: [] });
+            await new Promise((r) => setTimeout(r, 50));
+
+            targetWc.sendInputEvent({ type: "mouseUp", x: localX, y: localY, button, clickCount: 1, modifiers: [] });
+        } catch (error) {
+            console.error("[agent.ts] Error executing click:", error);
+            throw error;
+        }
     }
     else if (action.type === "scroll") {
-        console.log('[agent.ts] Executing scroll');
-        wc.sendInputEvent({
-            type: 'mouseWheel',
-            x: action.x,
-            y: action.y,
-            deltaX: 0,
-            deltaY: action.scrollY || action.deltaY
-        });
+        try {
+            if (!win.isFocused()) win.focus();
+            if (guestWc) guestWc.focus();
+            
+            await new Promise((r) => setTimeout(r, 50));
+
+            targetWc.sendInputEvent({
+                type: "mouseWheel",
+                x: localX,
+                y: localY,
+                deltaX: 0,
+                deltaY: -(action.scrollY || action.deltaY || 100)
+            });
+        } catch (error) {
+            console.error("[agent.ts] Error executing scroll:", error);
+            throw error;
+        }
     }
     else if (action.type === "navigate") {
-        console.log('[agent.ts] Navigating to', action.url);
-        wc.send("agent:navigate", action.url);
+        hostWc.send("agent:navigate", action.url);
     }
     else if (action.type === "type") {
-        console.log('[agent.ts] Typing text');
-        // Send each character as a key event
         for (const char of action.text) {
-            wc.sendInputEvent({
+            hostWc.sendInputEvent({
                 type: 'char',
                 keyCode: char
             });
         }
     }
     else if (action.type === "keypress") {
-        console.log('[agent.ts] Pressing key', action.keyCode);
-        wc.sendInputEvent({
+        hostWc.sendInputEvent({
             type: 'keyDown',
             keyCode: action.keyCode
         });
-        wc.sendInputEvent({
+        hostWc.sendInputEvent({
             type: 'keyUp',
             keyCode: action.keyCode
         });
     }
     else if (action.type === "wait") {
-        console.log('[agent.ts] Waiting 2 seconds');
         await new Promise(resolve => setTimeout(resolve, 2000));
     }
 }
@@ -146,10 +205,10 @@ export async function executeTask(userPrompt: string, screenshot: string | null,
     }
 
     try {
-        const aiDecision = await computerUse(userPrompt, screenshot);
+        const aiDecision = await computerUse(userPrompt, screenshot, win);
 
-        if (aiDecision && aiDecision[0]?.action) {
-            const action = aiDecision[0].action;
+        if (aiDecision && aiDecision[1]?.action) {
+            const action = aiDecision[1].action;
             console.log('[agent.ts] Executing action:', action);
             await executeAction(action, win);
         } else {
