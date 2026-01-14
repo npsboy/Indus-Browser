@@ -103,12 +103,28 @@ ipcMain.on('close-window', (event) => {
 app.whenReady().then(createWindow);
 
 
+// Screenshot resize factor (0.5 = 50% of original)
+const SCREENSHOT_SCALE_FACTOR = 0.5;
+
 async function takeScreenshot() {
     const wc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!wc) return null;
 
     const image = await wc.capturePage();
-    const imageBase64 = image.toDataURL();
+    
+    // Resize to reduce dimensions
+    const originalSize = image.getSize();
+    const targetWidth = Math.floor(originalSize.width * SCREENSHOT_SCALE_FACTOR);
+    const targetHeight = Math.floor(originalSize.height * SCREENSHOT_SCALE_FACTOR);
+    
+    const resizedImage = image.resize({ 
+        width: targetWidth, 
+        height: targetHeight,
+        quality: 'good'
+    });
+    
+    const jpegBuffer = resizedImage.toJPEG(70);
+    const imageBase64 = `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`;
 
     return imageBase64;
 }
@@ -145,17 +161,21 @@ ipcMain.handle('agent-command', async (_event, cmd) => {
     else if (cmd.type === "agent:click") {
         const wc = win?.webContents;
         if (wc) {
+            // Scale coordinates back up from resized screenshot
+            const actualX = Math.round(cmd.x / SCREENSHOT_SCALE_FACTOR);
+            const actualY = Math.round(cmd.y / SCREENSHOT_SCALE_FACTOR);
+            
             wc.sendInputEvent({
                 type: 'mouseDown',
-                x: cmd.x,
-                y: cmd.y,
+                x: actualX,
+                y: actualY,
                 button: 'left',
                 clickCount: 1
             });
             wc.sendInputEvent({
                 type: 'mouseUp',
-                x: cmd.x,
-                y: cmd.y,
+                x: actualX,
+                y: actualY,
                 button: 'left',
                 clickCount: 1
             });
@@ -164,10 +184,14 @@ ipcMain.handle('agent-command', async (_event, cmd) => {
     else if (cmd.type === "agent:scroll") {
         const wc = win?.webContents;
         if (wc) {
+            // Scale coordinates back up from resized screenshot
+            const actualX = Math.round(cmd.x / SCREENSHOT_SCALE_FACTOR);
+            const actualY = Math.round(cmd.y / SCREENSHOT_SCALE_FACTOR);
+            
             wc.sendInputEvent({
                 type: 'mouseWheel',
-                x: cmd.x,
-                y: cmd.y,
+                x: actualX,
+                y: actualY,
                 deltaX: 0,
                 deltaY: cmd.deltaY
             });

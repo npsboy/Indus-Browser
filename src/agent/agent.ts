@@ -1,6 +1,9 @@
 // Agent module - runs in Electron main process
 import { BrowserWindow, net, screen, webContents as electronWebContents } from "electron";
 
+// Screenshot resize factor - must match Main.ts
+const SCREENSHOT_SCALE_FACTOR = 0.5;
+
 
 async function planTask(userPrompt: string) {
     try {
@@ -107,10 +110,11 @@ async function executeAction(action: any, win: BrowserWindow) {
     const display = screen.getDisplayMatching(win.getBounds());
     const scaleFactor = display.scaleFactor || 1;
 
-    // Model coords are in device pixels (because you told backend scaledWidth/Height),
-    // but Electron input expects DIP.
-    const dipX = Math.round(action.x / scaleFactor);
-    const dipY = Math.round(action.y / scaleFactor);
+    // Scale coordinates back up from resized screenshot, then convert to DIP
+    const scaledX = Math.round(action.x / SCREENSHOT_SCALE_FACTOR);
+    const scaledY = Math.round(action.y / SCREENSHOT_SCALE_FACTOR);
+    const dipX = Math.round(scaledX / scaleFactor);
+    const dipY = Math.round(scaledY / scaleFactor);
 
     // Determine whether this point is inside the webview container in the *host page*
     const rect = await getWebviewContainerRect(win);
@@ -134,13 +138,13 @@ async function executeAction(action: any, win: BrowserWindow) {
         try {
             if (!win.isFocused()) win.focus();
             targetWc.focus();
-            await new Promise((r) => setTimeout(r, 50));
+            await new Promise((r) => setTimeout(r, 10));
 
             targetWc.sendInputEvent({ type: "mouseMove", x: localX, y: localY });
-            await new Promise((r) => setTimeout(r, 25));
+            await new Promise((r) => setTimeout(r, 10));
 
             targetWc.sendInputEvent({ type: "mouseDown", x: localX, y: localY, button, clickCount: 1, modifiers: [] });
-            await new Promise((r) => setTimeout(r, 50));
+            await new Promise((r) => setTimeout(r, 10));
 
             targetWc.sendInputEvent({ type: "mouseUp", x: localX, y: localY, button, clickCount: 1, modifiers: [] });
         } catch (error) {
