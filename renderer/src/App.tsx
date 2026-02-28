@@ -234,6 +234,13 @@ function App() {
             }
           });
 
+          menuItems.push({
+            label: 'View Mouse Coordinates',
+            action: () => {
+              setShowMouseCoords(prev => !prev);
+            }
+          });
+
           menuItems.forEach((item) => {
             const menuItem = document.createElement('div');
             menuItem.textContent = item.label;
@@ -294,6 +301,17 @@ function App() {
 
   const [isDarkTheme, setIsDarkTheme] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
+  const [showMouseCoords, setShowMouseCoords] = useState(false);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  useEffect(() => {
+    if (!showMouseCoords) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      setMousePos({ x: e.clientX, y: e.clientY });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, [showMouseCoords]);
   const [showAssistant, setShowAssistant] = useState(false);
   const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
@@ -547,6 +565,33 @@ function App() {
 
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
+      {/* Mouse Coordinate Display */}
+      {showMouseCoords && (
+        <div
+          onClick={() => setShowMouseCoords(false)}
+          style={{
+            position: 'fixed',
+            top: '12px',
+            right: '12px',
+            zIndex: 99999,
+            background: 'rgba(20, 20, 20, 0.92)',
+            color: '#e0e0e0',
+            fontFamily: 'monospace',
+            fontSize: '13px',
+            padding: '6px 12px',
+            borderRadius: '6px',
+            border: '1px solid rgba(255,255,255,0.15)',
+            cursor: 'pointer',
+            userSelect: 'none',
+            backdropFilter: 'blur(4px)',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+            pointerEvents: 'all',
+          }}
+          title="Click to close"
+        >
+          X: {mousePos.x} &nbsp; Y: {mousePos.y}
+        </div>
+      )}
       {/* Overlay to capture mouse events during resizing, preventing webview interference */}
       {isResizingSidebar && (
         <div
