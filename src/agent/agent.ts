@@ -1,3 +1,4 @@
+import { url } from "inspector";
 import { AgentCommand } from "./commands";
 
 
@@ -34,11 +35,11 @@ async function computerUse(taskGoal:string, screenshot:string){
     return data;
 }
 
-export function decideAction(input: string, screenshot: string): AgentCommand {
-    if (input.includes("new tab")) {
-        return { type: "agent:new-tab" };
-    }
-    if (input.includes("close tab")) {
-        return { type: "agent:close-active-tab" };
+export function decideAction(input: string, screenshot: string) {
+    console.log("Deciding action for input:", input);
+    if (input.includes("open new tab")) {
+        return { type: "agent:new-tab", url: "https://www.google.com" };  
+    } else if (input.includes("click")) {
+        return { type: "agent:click", x: 100, y: 200 };
     }
 }

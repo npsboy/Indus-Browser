@@ -61,5 +61,6 @@ contextBridge.exposeInMainWorld('api', {
     onCloseActiveTab,
     onAgentNavigate,
     onAgentNewTab,
-    onAgentReloadActiveTab
+    onAgentReloadActiveTab,
+    onAgentCloseActiveTab
 });
