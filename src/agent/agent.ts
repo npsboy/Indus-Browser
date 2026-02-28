@@ -1,11 +1,16 @@
 // Agent module - runs in Electron main process
 import { BrowserWindow, net, screen, webContents as electronWebContents } from "electron";
+const crypto = require('crypto');
 
 // Screenshot resize factor - must match Main.ts
 const SCREENSHOT_SCALE_FACTOR = 0.5;
 
 
-async function planTask(userPrompt: string) {
+async function planTask(userPrompt: string, screenshot: string) {
+    const imageUrl = screenshot.startsWith('data:') 
+        ? screenshot 
+        : `data:image/png;base64,${screenshot}`;
+
     try {
         const response = await net.fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
             method: "POST",
@@ -14,6 +19,7 @@ async function planTask(userPrompt: string) {
             },
             body: JSON.stringify({
                 agentRole: "planner",
+                imageUrl: imageUrl,
                 messages: [
                     { role: "system", content: "You are an expert browser agent that does tasks autonomously on the web." },
                     { role: "user", content: `Based on the following input, decide some high level actions that the agent should take.: "${userPrompt}"` }
@@ -32,6 +38,63 @@ async function planTask(userPrompt: string) {
         return data;
     } catch (error) {
         console.error('[agent.ts] planTask: Fetch error:', error);
+        throw error;
+    }
+}
+
+async function interpret(userPrompt: string, screenshot: string) {
+    const imageUrl = screenshot.startsWith('data:') 
+        ? screenshot 
+        : `data:image/png;base64,${screenshot}`;
+
+    try {
+        const response = await net.fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                agentRole: "interpreter",
+                imageUrl: imageUrl,
+                messages: [
+                    { role: "system", content: "You are an interpreter agent that works with an autonomous browser agnet to verify if it has completed the given task. \
+                        analyse the screenshot of the browser agent's action and determine if it has completed its task or not. You also have to analyse if the agent has encountered a \
+                         sensitive action like login/ payment / posting something in public that it is not allowed to do and \
+                         return a strict JSON: {taskCompletion: (true/false), sensitiveAction: (true/false)}    \
+                        "},
+                    { role: "user", content: `Based on the following input, decide the next action that the agent should take.: "${userPrompt}"` }
+                ]
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('[agent.ts] interpret: Error response:', response.status, errorText);
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
+
+        const text = await response.text();
+        console.log('[agent.ts] interpret: raw response text:', text);
+
+        // parse top-level response robustly
+        const parsed = safeParseJSON(text);
+
+        // some backends return { reply: '{"taskCompletion":true,...}' } (stringified nested JSON)
+        let result: any = parsed;
+        if (parsed && typeof parsed.reply === 'string') {
+            try {
+                result = safeParseJSON(parsed.reply);
+            } catch (e) {
+                // keep parsed as-is if nested parsing fails
+                console.warn('[agent.ts] interpret: failed to parse nested reply as JSON, using top-level parsed object', e);
+            }
+        }
+
+        console.log('[agent.ts] interpret: response data:', result);
+        return result;
+    }
+    catch (error) {
+        console.error('[agent.ts] interpret: Fetch error:', error);
         throw error;
     }
 }
@@ -147,6 +210,7 @@ async function executeAction(action: any, win: BrowserWindow) {
             await new Promise((r) => setTimeout(r, 10));
 
             targetWc.sendInputEvent({ type: "mouseUp", x: localX, y: localY, button, clickCount: 1, modifiers: [] });
+            targetWc.invalidate();
         } catch (error) {
             console.error("[agent.ts] Error executing click:", error);
             throw error;
@@ -166,6 +230,7 @@ async function executeAction(action: any, win: BrowserWindow) {
                 deltaX: 0,
                 deltaY: -(action.scrollY || action.deltaY || 100)
             });
+            targetWc.invalidate();
         } catch (error) {
             console.error("[agent.ts] Error executing scroll:", error);
             throw error;
@@ -176,25 +241,78 @@ async function executeAction(action: any, win: BrowserWindow) {
     }
     else if (action.type === "type") {
         for (const char of action.text) {
-            hostWc.sendInputEvent({
+            targetWc.sendInputEvent({
                 type: 'char',
                 keyCode: char
             });
         }
+        targetWc.invalidate();
     }
     else if (action.type === "keypress") {
-        hostWc.sendInputEvent({
+        targetWc.sendInputEvent({
             type: 'keyDown',
             keyCode: action.keyCode
         });
-        hostWc.sendInputEvent({
+        targetWc.sendInputEvent({
             type: 'keyUp',
             keyCode: action.keyCode
         });
+        targetWc.invalidate();
     }
     else if (action.type === "wait") {
         await new Promise(resolve => setTimeout(resolve, 2000));
     }
+}
+
+async function takeScreenshot() {
+    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!wc) return null;
+
+    const image = await wc.capturePage();
+    
+    // Resize to reduce dimensions
+    const originalSize = image.getSize();
+    const targetWidth = Math.floor(originalSize.width * SCREENSHOT_SCALE_FACTOR);
+    const targetHeight = Math.floor(originalSize.height * SCREENSHOT_SCALE_FACTOR);
+    
+    const resizedImage = image.resize({ 
+        width: targetWidth, 
+        height: targetHeight,
+        quality: 'good'
+    });
+    
+    const jpegBuffer = resizedImage.toJPEG(60);
+    const imageBase64 = `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`;
+
+    return imageBase64;
+}
+
+let lastscreenshothash;
+let lastaction;
+
+async function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// add helper to robustly parse JSON from possibly noisy backend responses
+function safeParseJSON(text: string) {
+	// try JSON.parse first
+	try {
+		return JSON.parse(text);
+	} catch (e) {
+		// try to extract the first {...} block
+		const match = text.match(/\{[\s\S]*\}/);
+		if (match) {
+			try {
+				return JSON.parse(match[0]);
+			} catch (e2) {
+				console.error('[agent.ts] safeParseJSON: failed to parse extracted JSON block', e2, 'extracted:', match[0]);
+				throw e2;
+			}
+		}
+		console.error('[agent.ts] safeParseJSON: no JSON object found in response text. raw text:', text);
+		throw e;
+	}
 }
 
 // Main function to execute a task from the UI
@@ -203,22 +321,35 @@ export async function executeTask(userPrompt: string, screenshot: string | null,
     console.log('[agent.ts] RECEIVED TASK:', userPrompt);
     console.log('[agent.ts] ========================================');
 
+    let current_screenshot = await takeScreenshot();
+
     if (!screenshot) {
         console.error('[agent.ts] No screenshot provided');
         return;
     }
+    while (true) {
+        current_screenshot = await takeScreenshot();
+        let current_screenshothash = crypto.createHash('sha256').update(current_screenshot || '').digest('hex');
+        try {
+            console.log('[agent.ts] sending to computerUse...');
+            const aiDecision = await computerUse(userPrompt, current_screenshot, win);
 
-    try {
-        const aiDecision = await computerUse(userPrompt, screenshot, win);
-
-        if (aiDecision && aiDecision[1]?.action) {
-            const action = aiDecision[1].action;
-            console.log('[agent.ts] Executing action:', action);
-            await executeAction(action, win);
-        } else {
-            console.warn('[agent.ts] No actions found in AI decision');
+            if (aiDecision && aiDecision[1]?.action) {
+                const action = aiDecision[1].action;
+                console.log('[agent.ts] Executing action:', action);
+                await executeAction(action, win);
+            } else {
+                console.warn('[agent.ts] No actions found in AI decision');
+            }
+        } catch (error) {
+            console.error('[agent.ts] Error executing task:', error);
         }
-    } catch (error) {
-        console.error('[agent.ts] Error executing task:', error);
+        await sleep(1000);
+        const interpretation = await interpret(userPrompt, current_screenshot || "");
+        if (interpretation.taskCompletion === true || interpretation.sensitiveAction === true) {
+            console.log('[agent.ts] Task completed or sensitive action detected. Stopping further actions.');
+            return;
+        }
     }
+
 }
