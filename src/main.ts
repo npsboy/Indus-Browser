@@ -5,9 +5,10 @@ import { decideAction } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
-    if (!input.control && !input.meta) return;
 
-    switch (input.key.toLowerCase()) {
+        if (!input.control && !input.meta) return;
+
+        switch (input.key.toLowerCase()) {
         case "r":
             event.preventDefault();
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:reload-active-tab");
@@ -63,7 +64,6 @@ function createWindow() {
 
     win.removeMenu();
 
-    win.webContents.openDevTools();
 
     win.loadURL("http://localhost:5173");
   
@@ -117,32 +117,41 @@ async function takeScreenshot() {
 
 async function runAgent(){
     const screenshot = await takeScreenshot();
-    const cmd = decideAction("click something", screenshot);
+    const cmd = await decideAction("type something", screenshot);
     console.log("____________________________________________________________________");
     console.log("Sent request to agent, got command:", cmd);
 
-    
+    // Get the focused webContents (could be a webview, not the main window)
+    const allContents = require("electron").webContents.getAllWebContents();
+    const focusedWc = allContents.find(wc => wc.isFocused()) 
+                      ?? BrowserWindow.getAllWindows()[0]?.webContents;
 
     if (cmd.type === "agent:new-tab") {
         console.log("Agent command is to open a new tab with url:", cmd.url);
         BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
     }
     else if (cmd.type === "agent:click") {
-        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-        wc.sendInputEvent({
+        focusedWc.sendInputEvent({
             type: 'mouseDown',
             x: cmd.x,
             y: cmd.y,
             button: 'left',
             clickCount: 1
         });
-        wc.sendInputEvent({
+        focusedWc.sendInputEvent({
             type: 'mouseUp',
             x: cmd.x,
             y: cmd.y,
             button: 'left',
             clickCount: 1
         });
+    }
+    else if (cmd.type === "agent:type") {
+        for (const char of cmd.text) {
+            focusedWc.sendInputEvent({ type: 'keyDown', keyCode: char });
+            focusedWc.sendInputEvent({ type: 'char',   keyCode: char });
+            focusedWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
+        }
     }
     /*
     else if (cmd.type === "agent:navigate") {

@@ -40,6 +40,9 @@ export function decideAction(input: string, screenshot: string) {
     if (input.includes("open new tab")) {
         return { type: "agent:new-tab", url: "https://www.google.com" };  
     } else if (input.includes("click")) {
-        return { type: "agent:click", x: 100, y: 200 };
+        return { type: "agent:click", x: 544, y: 26 };
+    }
+    else if (input.includes("type")) {
+        return { type: "agent:type", text: "Hello World" };
     }
 }
