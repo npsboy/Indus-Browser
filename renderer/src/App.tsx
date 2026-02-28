@@ -99,6 +99,7 @@ function App() {
   }, [tabs]);
 
   const webviewRefs = useRef<Map<string, HTMLWebViewElement>>(new Map());
+  const webviewContainerRef = useRef<HTMLDivElement>(null);
   //maps tab id to webview element inside .current
 
   const closeContextMenuRef = useRef<(() => void) | null>(null);
@@ -307,7 +308,13 @@ function App() {
   useEffect(() => {
     if (!showMouseCoords) return;
     const handleMouseMove = (e: MouseEvent) => {
-      setMousePos({ x: e.clientX, y: e.clientY });
+      const container = webviewContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        setMousePos({ x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) });
+      } else {
+        setMousePos({ x: e.clientX, y: e.clientY });
+      }
     };
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
@@ -740,7 +747,7 @@ function App() {
       </div>
 
       {/* Webview Container */}
-      <div className="webview-container">
+      <div className="webview-container" ref={webviewContainerRef}>
         {tabs.map((tab) => (
           <webview
             ref={(el) => {

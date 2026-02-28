@@ -35,6 +35,9 @@ function attachShortcutHandler(contents) {
                 wc.setZoomLevel(zoomLevel - 0.5);
             }
             break;
+        case "q":
+            runAgent();
+            break;
         default:
             break;
         
@@ -117,7 +120,7 @@ async function takeScreenshot() {
 
 async function runAgent(){
     const screenshot = await takeScreenshot();
-    const cmd = await decideAction("type something", screenshot);
+    const cmd = await decideAction("click something", screenshot);
     console.log("____________________________________________________________________");
     console.log("Sent request to agent, got command:", cmd);
 
