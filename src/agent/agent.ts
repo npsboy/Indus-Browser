@@ -1,5 +1,11 @@
 import { url } from "inspector";
 import { AgentCommand } from "./commands";
+import { processScreenshotForAgent } from "./screenshotProcessor";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+
+const agentPrompt = readFileSync(join(__dirname, "prompts/agent-prompt.md"), "utf-8");
 
 
 async function planTask(userPrompt:string){
@@ -35,14 +41,37 @@ async function computerUse(taskGoal:string, screenshot:string){
     return data;
 }
 
-export function decideAction(input: string, screenshot: string) {
-    console.log("Deciding action for input:", input);
-    if (input.includes("open new tab")) {
-        return { type: "agent:new-tab", url: "https://www.google.com" };  
-    } else if (input.includes("click")) {
-        return { type: "agent:click", x: 544, y: 26 };
+async function GetAction(userPrompt:string, imageurl:string){
+    const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ 
+            messages: [
+                { role: "system", content: agentPrompt },
+                { role: "user", content: `User task: "${userPrompt}"` }
+            ],
+            imageUrl: imageurl
+         })
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        console.error(`Agent endpoint error ${response.status}:`, errText);
+        return null;
     }
-    else if (input.includes("type")) {
-        return { type: "agent:type", text: "Hello World" };
+    const data = await response.json();
+    return data;
+}
+
+export async function decideAction(input: string, screenshot: string) {
+    console.log("Deciding action for input:", input);
+    try {
+        const action = await GetAction(input, screenshot);
+        console.log("Received action from agent:", action);
+        return action;
+    } catch (err) {
+        console.error("Error getting action from agent:", err);
+        return null;
     }
 }

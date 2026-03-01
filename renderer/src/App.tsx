@@ -308,13 +308,7 @@ function App() {
   useEffect(() => {
     if (!showMouseCoords) return;
     const handleMouseMove = (e: MouseEvent) => {
-      const container = webviewContainerRef.current;
-      if (container) {
-        const rect = container.getBoundingClientRect();
-        setMousePos({ x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) });
-      } else {
-        setMousePos({ x: e.clientX, y: e.clientY });
-      }
+      setMousePos({ x: Math.round(e.clientX), y: Math.round(e.clientY) });
     };
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);

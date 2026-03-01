@@ -2,6 +2,7 @@ import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
 import { decideAction } from "./agent/agent";
+import { processScreenshotForAgent } from "./agent/screenshotProcessor";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -71,11 +72,9 @@ function createWindow() {
     win.loadURL("http://localhost:5173");
   
     app.on("web-contents-created", function (_event, contents) {
+        // Skip the main window's webContents — already handled above
+        if (contents === win.webContents) return;
         attachShortcutHandler(contents);
-    });
-
-    win.webContents.on("did-finish-load", () => {
-        runAgent();
     });
     
 }
@@ -108,40 +107,62 @@ ipcMain.on('close-window', (event) => {
 
 app.whenReady().then(createWindow);
 
+let agentRunning = false;
 
 async function takeScreenshot() {
     const wc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!wc) return null;
     const image = await wc.capturePage();
     const resizeImage = image.resize({ width: 1280 });
-    const imageBase64 = resizeImage.toDataURL();
-    return imageBase64;
+    const rawBase64 = resizeImage.toDataURL();
+    const processedBase64 = await processScreenshotForAgent(rawBase64);
+
+    // Temporarily save the processed screenshot to disk for inspection
+    const fs = await import("fs");
+    const os = await import("os");
+    const savePath = path.join(os.tmpdir(), "indus-agent-screenshot.jpg");
+    const imgData = processedBase64.replace(/^data:image\/\w+;base64,/, "");
+    fs.writeFileSync(savePath, Buffer.from(imgData, "base64"));
+    console.log("Saved processed screenshot to:", savePath);
+
+    return processedBase64;
 }
 
 async function runAgent(){
+    if (agentRunning) {
+        console.log("Agent is already running, ignoring duplicate call.");
+        return;
+    }
+    agentRunning = true;
+    try {
     const screenshot = await takeScreenshot();
-    const cmd = await decideAction("click something", screenshot);
+    const cmd = await decideAction("sign me up for github copilot", screenshot);
     console.log("____________________________________________________________________");
     console.log("Sent request to agent, got command:", cmd);
 
-    // Get the focused webContents (could be a webview, not the main window)
-    const allContents = require("electron").webContents.getAllWebContents();
-    const focusedWc = allContents.find(wc => wc.isFocused()) 
-                      ?? BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!cmd) {
+        console.error("No command received from agent, aborting.");
+        return;
+    }
+
+    // Always use the main window webContents so coordinates are relative
+    // to the full captured page, not a child webview.
+    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    if (!mainWc) return;
 
     if (cmd.type === "agent:new-tab") {
         console.log("Agent command is to open a new tab with url:", cmd.url);
-        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:new-tab", cmd.url);
+        mainWc.send("agent:new-tab", cmd.url);
     }
     else if (cmd.type === "agent:click") {
-        focusedWc.sendInputEvent({
+        mainWc.sendInputEvent({
             type: 'mouseDown',
             x: cmd.x,
             y: cmd.y,
             button: 'left',
             clickCount: 1
         });
-        focusedWc.sendInputEvent({
+        mainWc.sendInputEvent({
             type: 'mouseUp',
             x: cmd.x,
             y: cmd.y,
@@ -151,9 +172,9 @@ async function runAgent(){
     }
     else if (cmd.type === "agent:type") {
         for (const char of cmd.text) {
-            focusedWc.sendInputEvent({ type: 'keyDown', keyCode: char });
-            focusedWc.sendInputEvent({ type: 'char',   keyCode: char });
-            focusedWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
+            mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
+            mainWc.sendInputEvent({ type: 'char',   keyCode: char });
+            mainWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
         }
     }
     /*
@@ -174,4 +195,7 @@ async function runAgent(){
     }
     */
 
+    } finally {
+        agentRunning = false;
+    }
 }

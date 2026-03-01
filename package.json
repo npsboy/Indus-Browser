@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc",
+    "build": "tsc && robocopy src\\agent\\prompts dist\\agent\\prompts /E /NFL /NDL /NJH /NJS & exit 0",
     "start": "npm run build && electron dist/main.js"
   },
   "keywords": [],
@@ -15,6 +15,9 @@
     "@types/node": "^25.0.3",
     "electron": "^39.2.7",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@types/sharp": "^0.31.1",
+    "sharp": "^0.34.5"
   }
-  
 }
