@@ -1,7 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { decideAction } from "./agent/agent";
+import { decideAction, translateCoordinates } from "./agent/agent";
 import { processScreenshotForAgent } from "./agent/screenshotProcessor";
 
 function attachShortcutHandler(contents) {
@@ -109,11 +109,13 @@ app.whenReady().then(createWindow);
 
 let agentRunning = false;
 
-async function takeScreenshot() {
+async function takeScreenshot(): Promise<{ base64: string; w: number; h: number } | null> {
     const wc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!wc) return null;
     const image = await wc.capturePage();
     const resizeImage = image.resize({ width: 1280 });
+    const w = resizeImage.getSize().width;
+    const h = resizeImage.getSize().height;
     const rawBase64 = resizeImage.toDataURL();
     const processedBase64 = await processScreenshotForAgent(rawBase64);
 
@@ -125,7 +127,7 @@ async function takeScreenshot() {
     fs.writeFileSync(savePath, Buffer.from(imgData, "base64"));
     console.log("Saved processed screenshot to:", savePath);
 
-    return processedBase64;
+    return { base64: processedBase64, w, h };
 }
 
 async function runAgent(){
@@ -135,8 +137,10 @@ async function runAgent(){
     }
     agentRunning = true;
     try {
-    const screenshot = await takeScreenshot();
-    const cmd = await decideAction("sign me up for github copilot", screenshot);
+    const screenshotResult = await takeScreenshot();
+    if (!screenshotResult) { agentRunning = false; return; }
+    const { base64: screenshot, w: ssW, h: ssH } = screenshotResult;
+    const cmd = await decideAction("sign me up for github copilot", screenshot, ssW, ssH);
     console.log("____________________________________________________________________");
     console.log("Sent request to agent, got command:", cmd);
 
@@ -177,10 +181,10 @@ async function runAgent(){
             mainWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
         }
     }
-    /*
     else if (cmd.type === "agent:navigate") {
         BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
     }
+    /*
     else if (cmd.type === "agent:scroll") {
         const wc = BrowserWindow.getAllWindows()[0]?.webContents;
         wc.sendInputEvent({

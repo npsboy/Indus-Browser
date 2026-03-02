@@ -532,11 +532,12 @@ function App() {
 
 
   useEffect(() => {
-    (window as any).api?.onAgentNavigate((_event: any, url: string) => {
+    const cleanup = (window as any).api?.onAgentNavigate((_event: any, url: string) => {
       if (activeTabId) {
         updateTabUrl(activeTabId, url);
       }
     });
+    return () => cleanup?.();
   }, [activeTabId]);
 
 
