@@ -1,8 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { decideAction, translateCoordinates } from "./agent/agent";
-import { processScreenshotForAgent } from "./agent/screenshotProcessor";
+import { runAgentWithInstruction } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -109,27 +108,6 @@ app.whenReady().then(createWindow);
 
 let agentRunning = false;
 
-async function takeScreenshot(): Promise<{ base64: string; w: number; h: number } | null> {
-    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-    if (!wc) return null;
-    const image = await wc.capturePage();
-    const resizeImage = image.resize({ width: 1280 });
-    const w = resizeImage.getSize().width;
-    const h = resizeImage.getSize().height;
-    const rawBase64 = resizeImage.toDataURL();
-    const processedBase64 = await processScreenshotForAgent(rawBase64);
-
-    // Temporarily save the processed screenshot to disk for inspection
-    const fs = await import("fs");
-    const os = await import("os");
-    const savePath = path.join(os.tmpdir(), "indus-agent-screenshot.jpg");
-    const imgData = processedBase64.replace(/^data:image\/\w+;base64,/, "");
-    fs.writeFileSync(savePath, Buffer.from(imgData, "base64"));
-    console.log("Saved processed screenshot to:", savePath);
-
-    return { base64: processedBase64, w, h };
-}
-
 async function runAgent(){
     if (agentRunning) {
         console.log("Agent is already running, ignoring duplicate call.");
@@ -137,68 +115,7 @@ async function runAgent(){
     }
     agentRunning = true;
     try {
-    const screenshotResult = await takeScreenshot();
-    if (!screenshotResult) { agentRunning = false; return; }
-    const { base64: screenshot, w: ssW, h: ssH } = screenshotResult;
-    const cmd = await decideAction("sign me up for github copilot", screenshot, ssW, ssH);
-    console.log("____________________________________________________________________");
-    console.log("Sent request to agent, got command:", cmd);
-
-    if (!cmd) {
-        console.error("No command received from agent, aborting.");
-        return;
-    }
-
-    // Always use the main window webContents so coordinates are relative
-    // to the full captured page, not a child webview.
-    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
-    if (!mainWc) return;
-
-    if (cmd.type === "agent:new-tab") {
-        console.log("Agent command is to open a new tab with url:", cmd.url);
-        mainWc.send("agent:new-tab", cmd.url);
-    }
-    else if (cmd.type === "agent:click") {
-        mainWc.sendInputEvent({
-            type: 'mouseDown',
-            x: cmd.x,
-            y: cmd.y,
-            button: 'left',
-            clickCount: 1
-        });
-        mainWc.sendInputEvent({
-            type: 'mouseUp',
-            x: cmd.x,
-            y: cmd.y,
-            button: 'left',
-            clickCount: 1
-        });
-    }
-    else if (cmd.type === "agent:type") {
-        for (const char of cmd.text) {
-            mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
-            mainWc.sendInputEvent({ type: 'char',   keyCode: char });
-            mainWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
-        }
-    }
-    else if (cmd.type === "agent:navigate") {
-        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:navigate", cmd.url);
-    }
-    /*
-    else if (cmd.type === "agent:scroll") {
-        const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-        wc.sendInputEvent({
-            type: 'mouseWheel',
-            x: cmd.x,
-            y: cmd.y,
-            deltaY: cmd.deltaY
-        });
-    }
-    else {
-        BrowserWindow.getAllWindows()[0]?.webContents.send(cmd.type);
-    }
-    */
-
+        await runAgentWithInstruction("sign me up for github copilot");
     } finally {
         agentRunning = false;
     }
