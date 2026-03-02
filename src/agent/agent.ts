@@ -138,7 +138,7 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     // that sendInputEvent expects, regardless of display DPR/scaling.
     const [winW, winH] = win.getContentSize();
     const image = await wc.capturePage();
-    const resized = image.resize({ width: 1280 });
+    const resized = image.resize({ width: 960 });
     const w = resized.getSize().width;
     const h = resized.getSize().height;
     const rawBase64 = resized.toDataURL();

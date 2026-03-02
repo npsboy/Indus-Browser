@@ -153,7 +153,7 @@ export async function processScreenshotForAgent(base64Image: string): Promise<st
             { input: q3, top: q3y, left: q3x },
             { input: q4, top: q4y, left: q4x },
         ])
-        .jpeg({ quality: 90 })
+        .jpeg({ quality: 65 })
         .toBuffer();
 
     return `data:image/jpeg;base64,${outputBuf.toString("base64")}`;
