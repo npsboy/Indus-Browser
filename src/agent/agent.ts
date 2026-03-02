@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { BrowserWindow, webContents as allWebContents } from "electron";
 import { processScreenshotForAgent } from "./screenshotProcessor";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -97,9 +97,46 @@ export function translateCoordinates(
     };
 }
 
-async function takeScreenshot(): Promise<{ base64: string; w: number; h: number } | null> {
-    const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-    if (!wc) return null;
+/** Returns the active webview's guest WebContents and its bounds in window-space. */
+async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: number; y: number; w: number; h: number } | null> {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return null;
+
+    // Ask the renderer for the active webview's bounding rect
+    const bounds: { x: number; y: number; w: number; h: number } | null =
+        await win.webContents.executeJavaScript(`
+            (() => {
+                const wv = document.querySelector('webview[style*="display: flex"]');
+                if (!wv) return null;
+                const r = wv.getBoundingClientRect();
+                return { x: r.left, y: r.top, w: r.width, h: r.height };
+            })()
+        `);
+
+    if (!bounds) {
+        console.error("Could not find active webview bounds");
+        return null;
+    }
+
+    // Find the guest WebContents for the active webview
+    const guestWc = allWebContents.getAllWebContents()
+        .find(wc => wc.getType() === "webview" && wc !== win.webContents);
+
+    if (!guestWc) {
+        console.error("Could not find webview WebContents");
+        return null;
+    }
+
+    return { wc: guestWc, ...bounds };
+}
+
+async function takeScreenshot(): Promise<{ base64: string; w: number; h: number; winW: number; winH: number } | null> {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return null;
+    const wc = win.webContents;
+    // getContentSize() returns logical/CSS pixels — the same coordinate space
+    // that sendInputEvent expects, regardless of display DPR/scaling.
+    const [winW, winH] = win.getContentSize();
     const image = await wc.capturePage();
     const resized = image.resize({ width: 1280 });
     const w = resized.getSize().width;
@@ -112,8 +149,9 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number 
     const imgData = processedBase64.replace(/^data:image\/\w+;base64,/, "");
     writeFileSync(savePath, Buffer.from(imgData, "base64"));
     console.log("Saved processed screenshot to:", savePath);
+    console.log(`Screenshot: resized=${w}x${h}, window(logical)=${winW}x${winH}, scale=${(winW/w).toFixed(3)}x${(winH/h).toFixed(3)}`);
 
-    return { base64: processedBase64, w, h };
+    return { base64: processedBase64, w, h, winW, winH };
 }
 
 async function executeCommand(cmd: any): Promise<void> {
@@ -124,8 +162,20 @@ async function executeCommand(cmd: any): Promise<void> {
         console.log("Agent command: open new tab with url:", cmd.url);
         mainWc.send("agent:new-tab", cmd.url);
     } else if (cmd.type === "agent:click") {
-        mainWc.sendInputEvent({ type: 'mouseDown', x: cmd.x, y: cmd.y, button: 'left', clickCount: 1 });
-        mainWc.sendInputEvent({ type: 'mouseUp',   x: cmd.x, y: cmd.y, button: 'left', clickCount: 1 });
+        // sendInputEvent on the main WebContents does NOT reach <webview> guest pages
+        // (they are out-of-process). We must send to the guest WebContents directly,
+        // with coordinates relative to the webview, not the full window.
+        const webviewInfo = await getActiveWebviewWc();
+        if (!webviewInfo) {
+            console.error("Cannot click: no active webview found");
+            return;
+        }
+        const relX = Math.round(cmd.x - webviewInfo.x);
+        const relY = Math.round(cmd.y - webviewInfo.y);
+        console.log(`Sending click to webview WebContents: window=(${cmd.x},${cmd.y}) webviewOffset=(${webviewInfo.x},${webviewInfo.y}) relative=(${relX},${relY})`);
+        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
+        webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
+        webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
     } else if (cmd.type === "agent:type") {
         for (const char of cmd.text) {
             mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
@@ -135,7 +185,11 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:navigate") {
         mainWc.send("agent:navigate", cmd.url);
     } else if (cmd.type === "agent:scroll") {
-        mainWc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaY: cmd.deltaY } as any);
+        const webviewInfo = await getActiveWebviewWc();
+        if (!webviewInfo) return;
+        const relX = Math.round(cmd.x - webviewInfo.x);
+        const relY = Math.round(cmd.y - webviewInfo.y);
+        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: relX, y: relY, deltaY: cmd.deltaY } as any);
     }
 }
 
@@ -147,7 +201,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         console.error("Failed to take screenshot.");
         return;
     }
-    const { base64: screenshot, w: ssW, h: ssH } = screenshotResult;
+    const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
 
     const response = await GetAction(instruction, screenshot);
     if (!response) return;
@@ -166,7 +220,13 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
 
     let cmd: any;
     if (tool.name === "click") {
-        cmd = { type: "agent:click", ...translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH) };
+        // translateCoordinates returns coords in the resized-screenshot space (1280px wide).
+        // Scale back to the logical window size (CSS pixels) for sendInputEvent.
+        const ssCoords = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
+        const clickX = Math.round(ssCoords.x * (winW / ssW));
+        const clickY = Math.round(ssCoords.y * (winH / ssH));
+        console.log(`Click: label=(${tool_arguments.x},${tool_arguments.y}) → ss=(${ssCoords.x},${ssCoords.y}) → window=(${clickX},${clickY})`);
+        cmd = { type: "agent:click", x: clickX, y: clickY };
     } else if (tool.name === "type") {
         cmd = { type: "agent:type", text: tool_arguments.text };
     } else if (tool.name === "new-tab") {
@@ -174,7 +234,10 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
     } else if (tool.name === "navigate") {
         cmd = { type: "agent:navigate", url: tool_arguments.url };
     } else if (tool.name === "scroll") {
-        cmd = { type: "agent:scroll", x: tool_arguments.x, y: tool_arguments.y, deltaY: tool_arguments.deltaY };
+        // Scale scroll coordinates from screenshot space to logical window space.
+        const scrollX = Math.round(tool_arguments.x * (winW / ssW));
+        const scrollY = Math.round(tool_arguments.y * (winH / ssH));
+        cmd = { type: "agent:scroll", x: scrollX, y: scrollY, deltaY: tool_arguments.deltaY };
     }
 
     if (!cmd) {
