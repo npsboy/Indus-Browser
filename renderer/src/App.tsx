@@ -15,6 +15,7 @@ import maximizeIcon from "./assets/Icons/Maximize-Grey.png";
 import closeIcon from "./assets/Icons/Close-Grey.png";
 import profilePic from "./assets/Images/Profile-Pictures/Profile-Picture-1.jpg";
 import loadingAnimation from "./assets/Icons/loading-animation.gif";
+import cursorIcon from "./assets/Icons/cursor-white.png";
 
 function App() {
 
@@ -317,6 +318,7 @@ function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [agentCursor, setAgentCursor] = useState<{ x: number; y: number } | null>(null);
   const [showAssistant, setShowAssistant] = useState(false);
   const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
@@ -375,6 +377,13 @@ function App() {
     }
     (window as any).api?.runAgentInstruction(text);
   }
+
+  useEffect(() => {
+    const cleanup = (window as any).api?.onAgentCursorFlash((_event: any, pos: { x: number; y: number }) => {
+      setAgentCursor({ x: pos.x, y: pos.y });
+    });
+    return () => cleanup?.();
+  }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -586,6 +595,14 @@ function App() {
 
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
+      {/* Agent click cursor flash */}
+      {agentCursor && (
+        <img
+          src={cursorIcon}
+          className="agent-cursor-indicator"
+          style={{ left: agentCursor.x, top: agentCursor.y }}
+        />
+      )}
       {/* Mouse Coordinate Display */}
       {showMouseCoords && (
         <div

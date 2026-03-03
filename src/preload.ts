@@ -55,6 +55,11 @@ function runAgentInstruction(instruction: string): Promise<void> {
   return ipcRenderer.invoke('agent:run-instruction', instruction);
 }
 
+function onAgentCursorFlash(callback: (_event: any, pos: { x: number; y: number }) => void) {
+  ipcRenderer.on("agent:cursor-flash", callback);
+  return () => ipcRenderer.removeListener("agent:cursor-flash", callback);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -67,5 +72,6 @@ contextBridge.exposeInMainWorld('api', {
     onAgentNewTab,
     onAgentReloadActiveTab,
     onAgentCloseActiveTab,
-    runAgentInstruction
+    runAgentInstruction,
+    onAgentCursorFlash
 });

@@ -733,3 +733,13 @@
   color: #e4e4e7;
 }
 
+/* Agent click cursor indicator */
+.agent-cursor-indicator {
+  position: fixed;
+  width: 28px;
+  height: 28px;
+  pointer-events: none;
+  z-index: 999999;
+  transform-origin: top left;
+  opacity: 0.9;
+}

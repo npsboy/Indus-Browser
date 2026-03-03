@@ -177,6 +177,8 @@ async function executeCommand(cmd: any): Promise<void> {
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
+        // Flash cursor icon in the renderer at the window-space click position
+        mainWc.send("agent:cursor-flash", { x: cmd.x, y: cmd.y });
     } else if (cmd.type === "agent:type") {
         for (const char of cmd.text) {
             mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
@@ -317,6 +319,6 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         past_actions.push(description);
 
         // Wait for the webview to update (navigation or load complete), timeout after 1.5s
-        await waitForWebviewUpdate(5000);
+        await waitForWebviewUpdate(10000);
     }
 }
