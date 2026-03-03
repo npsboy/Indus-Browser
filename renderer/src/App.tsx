@@ -313,6 +313,10 @@ function App() {
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [showMouseCoords]);
+  type ChatMessage = { role: 'user' | 'agent'; text: string };
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const [showAssistant, setShowAssistant] = useState(false);
   const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
@@ -360,6 +364,21 @@ function App() {
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
     }
   };
+
+  function handleAgentSend() {
+    const text = chatInput.trim();
+    if (!text) return;
+    setChatMessages(prev => [...prev, { role: 'user', text }]);
+    setChatInput("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+    (window as any).api?.runAgentInstruction(text);
+  }
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
 
   useEffect(() => {
     const calculateTabWidth = () => {
@@ -773,9 +792,20 @@ function App() {
                 setIsResizingSidebar(true);
               }}
             />
-            <div className="assistant-empty-state">
-              <img src={logo} alt="Agent" className="agent-logo-large" />
-              <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
+            <div className="assistant-messages">
+              {chatMessages.length === 0 ? (
+                <div className="assistant-empty-state">
+                  <img src={logo} alt="Agent" className="agent-logo-large" />
+                  <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
+                </div>
+              ) : (
+                chatMessages.map((msg, i) => (
+                  <div key={i} className={`chat-message chat-message-${msg.role}`}>
+                    <span className="chat-bubble">{msg.text}</span>
+                  </div>
+                ))
+              )}
+              <div ref={chatEndRef} />
             </div>
             
             <div className="assistant-input-container">
@@ -786,15 +816,17 @@ function App() {
                   className="assistant-text-input" 
                   autoFocus 
                   rows={1}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
                   onInput={handleInputResize}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      // Handle send logic here
+                      handleAgentSend();
                     }
                   }}
                 />
-                <button className="assistant-send-button">➤</button>
+                <button className="assistant-send-button" onClick={handleAgentSend}>➤</button>
               </div>
               <div className="assistant-input-footer">
                 <button className="assistant-attach-button" title="Attach file">

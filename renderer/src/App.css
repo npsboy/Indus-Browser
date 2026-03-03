@@ -554,6 +554,58 @@
   letter-spacing: 0.5px;
 }
 
+.assistant-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 4px;
+}
+
+.assistant-messages::-webkit-scrollbar {
+  width: 4px;
+}
+
+.assistant-messages::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 2px;
+}
+
+.chat-message {
+  display: flex;
+}
+
+.chat-message-user {
+  justify-content: flex-end;
+}
+
+.chat-message-agent {
+  justify-content: flex-start;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-message-user .chat-bubble {
+  background: #3f3f46;
+  color: #e4e4e7;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-message-agent .chat-bubble {
+  background: #27272a;
+  color: #a1a1aa;
+  border-bottom-left-radius: 4px;
+}
+
 .assistant-input-container {
   background: #18181b;
   border: 1px solid #27272a;

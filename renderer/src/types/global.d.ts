@@ -6,6 +6,7 @@ declare global {
       minimizeWindow: () => void;
       maximizeWindow: () => void;
       closeWindow: () => void;
+      runAgentInstruction: (instruction: string) => Promise<void>;
     };
   }
 }

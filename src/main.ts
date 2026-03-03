@@ -106,16 +106,20 @@ ipcMain.on('close-window', (event) => {
 
 app.whenReady().then(createWindow);
 
+ipcMain.handle('agent:run-instruction', async (_event, instruction: string) => {
+    await runAgent(instruction);
+});
+
 let agentRunning = false;
 
-async function runAgent(){
+async function runAgent(instruction?: string){
     if (agentRunning) {
         console.log("Agent is already running, ignoring duplicate call.");
         return;
     }
     agentRunning = true;
     try {
-        await runAgentWithInstruction("sign me up for github copilot");
+        await runAgentWithInstruction(instruction ?? "sign me up for github copilot");
     } finally {
         agentRunning = false;
     }

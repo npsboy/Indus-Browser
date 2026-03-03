@@ -51,6 +51,10 @@ function onAgentCloseActiveTab(callback: () => void) {
   return () => ipcRenderer.removeListener("agent:close-active-tab", callback);
 }
 
+function runAgentInstruction(instruction: string): Promise<void> {
+  return ipcRenderer.invoke('agent:run-instruction', instruction);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -62,5 +66,6 @@ contextBridge.exposeInMainWorld('api', {
     onAgentNavigate,
     onAgentNewTab,
     onAgentReloadActiveTab,
-    onAgentCloseActiveTab
+    onAgentCloseActiveTab,
+    runAgentInstruction
 });
