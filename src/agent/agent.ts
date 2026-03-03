@@ -49,8 +49,12 @@ async function GetAction(userPrompt:string, imageurl:string){
         },
         body: JSON.stringify({ 
             messages: [
-                { role: "system", content: agentPrompt },
-                { role: "system", content: "Previous actions: " + past_actions.join("\n") },
+                {
+                    role: "system",
+                    content: agentPrompt + (past_actions.length > 0
+                        ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${a}`).join("\n")
+                        : "")
+                },
                 { role: "user", content: `User task: "${userPrompt}"` }
             ],
             imageUrl: imageurl

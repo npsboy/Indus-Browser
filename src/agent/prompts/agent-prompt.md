@@ -7,6 +7,8 @@ For the coordinates, you will return the row and column label. both are named in
 Note: though every alternate row/column is not labeled, eg: 1b, 1d, you are still allowed to click on them.
 
 Use all information like past actions and current screenshot and current cursor position (market by the ted target) to analyse if something did not work as you expected. in that case try a little differnently.
-Avoid doing the same action again unless you are sure that the previous action did not work
+Avoid doing the same action again unless you are sure that the previous action did not work.
+
+Feel free to stop when you feel you have completed the task to a reasonable level.
 
 Return strict json.
