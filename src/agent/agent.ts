@@ -161,6 +161,85 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     return { base64: processedBase64, w, h, winW, winH };
 }
 
+/**
+ * Finds the center of the nearest clickable element to (targetX, targetY) in the
+ * webview's page. "Clickable" means <a>, <button>, <input>, <select>, <textarea>,
+ * or any element with role="button"/"link"/"menuitem"/"tab"/"checkbox"/"radio",
+ * [onclick], or [tabindex]. Searches within MAX_RADIUS CSS pixels.
+ * Returns the snapped {x, y} or the original coords if nothing closer is found.
+ */
+async function snapToClickable(
+    guestWc: Electron.WebContents,
+    targetX: number,
+    targetY: number
+): Promise<{ x: number; y: number }> {
+    const MAX_RADIUS = 80;
+    const CLICKABLE_ROLES = ["button","link","menuitem","menuitemcheckbox","menuitemradio","tab","checkbox","radio","option","combobox","listbox","switch","treeitem"];
+
+    const result: { x: number; y: number } | null = await guestWc.executeJavaScript(`
+        (() => {
+            const tx = ${targetX}, ty = ${targetY};
+            const maxR = ${MAX_RADIUS};
+            const clickableRoles = ${JSON.stringify(CLICKABLE_ROLES)};
+
+            function isClickable(el) {
+                if (!el || el === document.documentElement || el === document.body) return false;
+                const tag = el.tagName.toLowerCase();
+                if (['a','button','input','select','textarea','label'].includes(tag)) return true;
+                const role = (el.getAttribute('role') || '').toLowerCase();
+                if (clickableRoles.includes(role)) return true;
+                if (el.hasAttribute('onclick')) return true;
+                const ti = el.getAttribute('tabindex');
+                if (ti !== null && ti !== '-1') return true;
+                return false;
+            }
+
+            function rectCenter(r) {
+                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
+
+            function dist(cx, cy) {
+                return Math.sqrt((cx - tx) ** 2 + (cy - ty) ** 2);
+            }
+
+            // 1. Walk up from the element exactly at the target point.
+            let el = document.elementFromPoint(tx, ty);
+            while (el && el !== document.documentElement) {
+                if (isClickable(el)) {
+                    const c = rectCenter(el.getBoundingClientRect());
+                    return { x: Math.round(c.x), y: Math.round(c.y) };
+                }
+                el = el.parentElement;
+            }
+
+            // 2. Scan all clickable elements and pick the closest within maxR.
+            const selector = 'a,button,input,select,textarea,label,[role],[onclick],[tabindex]';
+            const candidates = Array.from(document.querySelectorAll(selector));
+            let bestDist = maxR + 1;
+            let bestCenter = null;
+            for (const c of candidates) {
+                if (!isClickable(c)) continue;
+                const r = c.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                const cx = r.left + r.width / 2;
+                const cy = r.top + r.height / 2;
+                const d = dist(cx, cy);
+                if (d < bestDist) {
+                    bestDist = d;
+                    bestCenter = { x: Math.round(cx), y: Math.round(cy) };
+                }
+            }
+            return bestCenter;
+        })()
+    `).catch(() => null);
+
+    if (result) {
+        console.log(`[Agent] Snapped click from (${targetX},${targetY}) → (${result.x},${result.y})`);
+        return result;
+    }
+    return { x: targetX, y: targetY };
+}
+
 async function executeCommand(cmd: any): Promise<void> {
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!mainWc) return;
@@ -169,14 +248,15 @@ async function executeCommand(cmd: any): Promise<void> {
         mainWc.send("agent:new-tab", cmd.url);
     } else if (cmd.type === "agent:click") {
         // cmd.x/y are already webview-relative (screenshot was captured from the webview).
-        // Send directly to the guest WebContents without any offset adjustment.
+        // Snap to the nearest clickable element before dispatching.
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) {
             console.error("Cannot click: no active webview found");
             return;
         }
-        const relX = cmd.x;
-        const relY = cmd.y;
+        const snapped = await snapToClickable(webviewInfo.wc, cmd.x, cmd.y);
+        const relX = snapped.x;
+        const relY = snapped.y;
         lastCursorPos = { x: relX, y: relY };
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
@@ -240,14 +320,19 @@ let past_actions = [];
 let lastCursorPos: { x: number; y: number } | null = null;
 
 /**
- * Waits for any DOM mutation in the active webview's guest page using
- * a MutationObserver injected via executeJavaScript.
- * Resolves once a DOM change is detected (or timeout fires), but always
- * waits at least 1.5 seconds regardless.
+ * Waits for the DOM in the active webview's guest page to settle after an action.
+ * Uses a debounced MutationObserver — resolves only once mutations have stopped
+ * arriving for DEBOUNCE_MS, so small cascading changes (e.g. dropdowns, animations)
+ * are fully captured before the agent takes its next screenshot.
+ * Always waits at least MIN_DELAY_MS regardless of how fast the DOM settles.
  */
 async function waitForDomChange(timeout: number): Promise<void> {
-    const minDelay = new Promise<void>(resolve => setTimeout(resolve, 1500));
-    // Node-side timeout — always fires, guards against a stuck executeJavaScript
+    const MIN_DELAY_MS = 1200;
+    const DEBOUNCE_MS  = 400;   // wait this long after the last mutation before resolving
+    const MAX_FROM_FIRST_MS = 3000; // hard cap from first detected mutation
+
+    const minDelay = new Promise<void>(resolve => setTimeout(resolve, MIN_DELAY_MS));
+    // Node-side timeout — guards against a stuck executeJavaScript call
     const nodeTimeout = new Promise<void>(resolve => setTimeout(resolve, timeout));
     const webviewInfo = await getActiveWebviewWc();
     if (!webviewInfo) {
@@ -255,22 +340,41 @@ async function waitForDomChange(timeout: number): Promise<void> {
         return;
     }
     const guestWc = webviewInfo.wc;
-    // Race the injected MutationObserver against the Node-side timeout so that
-    // if the JS context is destroyed (e.g. page navigation), we don't hang.
+    // Race the injected debounced MutationObserver against the Node-side timeout so
+    // that if the JS context is destroyed (e.g. page navigation) we don't hang.
     const domChangePromise = Promise.race([
         guestWc.executeJavaScript(`
             new Promise(resolve => {
-                const observer = new MutationObserver(() => {
+                let debounceTimer = null;
+                let firstMutationTimer = null;
+
+                const settle = () => {
+                    if (debounceTimer) clearTimeout(debounceTimer);
+                    if (firstMutationTimer) clearTimeout(firstMutationTimer);
                     observer.disconnect();
                     resolve();
+                };
+
+                const observer = new MutationObserver(() => {
+                    // Cap total wait from first mutation so a continuously-mutating
+                    // page (e.g. live ticker) doesn't stall the agent indefinitely.
+                    if (!firstMutationTimer) {
+                        firstMutationTimer = setTimeout(settle, ${MAX_FROM_FIRST_MS});
+                    }
+                    // Keep resetting the debounce window on every mutation.
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(settle, ${DEBOUNCE_MS});
                 });
+
                 observer.observe(document.documentElement, {
                     childList: true,
                     subtree: true,
                     attributes: true,
                     characterData: true
                 });
-                setTimeout(() => { observer.disconnect(); resolve(); }, ${timeout});
+
+                // Hard outer timeout matches the caller's timeout parameter.
+                setTimeout(settle, ${timeout});
             })
         `).catch(() => {}),
         nodeTimeout,
@@ -328,7 +432,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         past_actions.push(explanation);
         BrowserWindow.getAllWindows()[0]?.webContents.send("agent:action", explanation);
 
-        // Wait for any DOM change in the webview, timeout after 10s
-        await waitForDomChange(5000);
+        // Wait for any DOM change in the webview, timeout after 1s
+        await waitForDomChange(1500);
     }
 }
