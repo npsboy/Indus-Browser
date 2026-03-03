@@ -69,15 +69,16 @@ async function GetAction(userPrompt:string, imageurl:string){
     return data;
 }
 
-/** Reverse of gridLabel(): parse "2c" → 0-based grid index */
+/** Reverse of gridLabel(): parse e.g. "a5" → 0-based grid index.
+ * Each letter covers 10 raw indices (a→0-9, b→10-19, …).
+ * Number 1-10 maps to offset 0-9 within the group. */
 function parseLabelIndex(label: string): number {
     const letters = "abcdefghijklmnopqrstuvwxyz";
-    const match = label.match(/^(\d+)([a-z])$/);
+    const match = label.match(/^([a-z])(\d+)$/);
     if (!match) throw new Error(`Invalid grid label: "${label}"`);
-    const numPart    = parseInt(match[1], 10);   // e.g. 2
-    const letterPart = match[2];                 // e.g. "c"
-    const letterIdx  = letters.indexOf(letterPart); // 0-based
-    return (numPart - 1) * 26 + letterIdx;       // 0-based grid-line index
+    const letterIdx = letters.indexOf(match[1]);  // 0-based letter group
+    const num       = parseInt(match[2], 10);     // 1-based number within group
+    return letterIdx * 10 + (num - 1);            // 0-based raw grid index
 }
 
 /**
