@@ -386,6 +386,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const cleanup = (window as any).api?.onAgentAction((_event: any, description: string) => {
+      setChatMessages(prev => [...prev, { role: 'agent', text: description }]);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 

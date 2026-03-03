@@ -149,8 +149,6 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     const savePath = join(tmpdir(), "indus-agent-screenshot.jpg");
     const imgData = processedBase64.replace(/^data:image\/\w+;base64,/, "");
     writeFileSync(savePath, Buffer.from(imgData, "base64"));
-    console.log("Saved processed screenshot to:", savePath);
-    console.log(`Screenshot: resized=${w}x${h}, window(logical)=${winW}x${winH}, scale=${(winW/w).toFixed(3)}x${(winH/h).toFixed(3)}`);
 
     return { base64: processedBase64, w, h, winW, winH };
 }
@@ -160,7 +158,6 @@ async function executeCommand(cmd: any): Promise<void> {
     if (!mainWc) return;
 
     if (cmd.type === "agent:new-tab") {
-        console.log("Agent command: open new tab with url:", cmd.url);
         mainWc.send("agent:new-tab", cmd.url);
     } else if (cmd.type === "agent:click") {
         // sendInputEvent on the main WebContents does NOT reach <webview> guest pages
@@ -173,7 +170,6 @@ async function executeCommand(cmd: any): Promise<void> {
         }
         const relX = Math.round(cmd.x - webviewInfo.x);
         const relY = Math.round(cmd.y - webviewInfo.y);
-        console.log(`Sending click to webview WebContents: window=(${cmd.x},${cmd.y}) webviewOffset=(${webviewInfo.x},${webviewInfo.y}) relative=(${relX},${relY})`);
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
@@ -213,7 +209,6 @@ if (!tool) return;
         const ssCoords = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
         const clickX = Math.round(ssCoords.x * (winW / ssW));
         const clickY = Math.round(ssCoords.y * (winH / ssH));
-        console.log(`Click: label=(${tool_arguments.x},${tool_arguments.y}) → ss=(${ssCoords.x},${ssCoords.y}) → window=(${clickX},${clickY})`);
         cmd = { type: "agent:click", x: clickX, y: clickY };
     } else if (tool.name === "type") {
         cmd = { type: "agent:type", text: tool_arguments.text };
@@ -237,36 +232,42 @@ if (!tool) return;
 let past_actions = [];
 
 /**
- * Waits for the active webview's guest WebContents to emit any of
- * did-navigate, did-navigate-in-page, or did-finish-load.
- * Resolves early when one fires; falls back to the given timeout (ms).
+ * Waits for any DOM mutation in the active webview's guest page using
+ * a MutationObserver injected via executeJavaScript.
+ * Resolves once a DOM change is detected (or timeout fires), but always
+ * waits at least 1.5 seconds regardless.
  */
-async function waitForWebviewUpdate(timeout: number): Promise<void> {
+async function waitForDomChange(timeout: number): Promise<void> {
+    const minDelay = new Promise<void>(resolve => setTimeout(resolve, 1500));
+    // Node-side timeout — always fires, guards against a stuck executeJavaScript
+    const nodeTimeout = new Promise<void>(resolve => setTimeout(resolve, timeout));
     const webviewInfo = await getActiveWebviewWc();
     if (!webviewInfo) {
-        // No webview found — just wait the full timeout
-        await new Promise(resolve => setTimeout(resolve, timeout));
+        await Promise.all([minDelay, nodeTimeout]);
         return;
     }
     const guestWc = webviewInfo.wc;
-    return new Promise<void>(resolve => {
-        let resolved = false;
-        const done = () => {
-            if (resolved) return;
-            resolved = true;
-            cleanup();
-            resolve();
-        };
-        const cleanup = () => {
-            guestWc.off("did-navigate",         done);
-            guestWc.off("did-navigate-in-page", done);
-            guestWc.off("did-finish-load",      done);
-        };
-        guestWc.once("did-navigate",         done);
-        guestWc.once("did-navigate-in-page", done);
-        guestWc.once("did-finish-load",      done);
-        setTimeout(done, timeout);
-    });
+    // Race the injected MutationObserver against the Node-side timeout so that
+    // if the JS context is destroyed (e.g. page navigation), we don't hang.
+    const domChangePromise = Promise.race([
+        guestWc.executeJavaScript(`
+            new Promise(resolve => {
+                const observer = new MutationObserver(() => {
+                    observer.disconnect();
+                    resolve();
+                });
+                observer.observe(document.documentElement, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    characterData: true
+                });
+                setTimeout(() => { observer.disconnect(); resolve(); }, ${timeout});
+            })
+        `).catch(() => {}),
+        nodeTimeout,
+    ]);
+    await Promise.all([minDelay, domChangePromise]);
 }
 
 export async function runAgentWithInstruction(instruction: string): Promise<void> {
@@ -284,7 +285,6 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         const response = await GetAction(instruction, screenshot);
         if (!response) return;
 
-        console.log("Raw response from agent:", response);
         let tool = response?.tool || null;
         console.log("Agent selected tool:", tool);
 
@@ -315,10 +315,11 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         console.log("Executing command:", cmd);
         await executeCommand(cmd);
 
-        let description = tool_arguments.description || "No explanation provided.";
-        past_actions.push(description);
+        let explanation = tool_arguments.explanation || "No explanation provided.";
+        past_actions.push(explanation);
+        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:action", explanation);
 
-        // Wait for the webview to update (navigation or load complete), timeout after 1.5s
-        await waitForWebviewUpdate(10000);
+        // Wait for any DOM change in the webview, timeout after 10s
+        await waitForDomChange(5000);
     }
 }

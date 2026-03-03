@@ -60,6 +60,11 @@ function onAgentCursorFlash(callback: (_event: any, pos: { x: number; y: number 
   return () => ipcRenderer.removeListener("agent:cursor-flash", callback);
 }
 
+function onAgentAction(callback: (_event: any, description: string) => void) {
+  ipcRenderer.on("agent:action", callback);
+  return () => ipcRenderer.removeListener("agent:action", callback);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -73,5 +78,6 @@ contextBridge.exposeInMainWorld('api', {
     onAgentReloadActiveTab,
     onAgentCloseActiveTab,
     runAgentInstruction,
-    onAgentCursorFlash
+    onAgentCursorFlash,
+    onAgentAction
 });
