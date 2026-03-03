@@ -132,18 +132,21 @@ async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: numb
 }
 
 async function takeScreenshot(): Promise<{ base64: string; w: number; h: number; winW: number; winH: number } | null> {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return null;
-    const wc = win.webContents;
-    // getContentSize() returns logical/CSS pixels — the same coordinate space
-    // that sendInputEvent expects, regardless of display DPR/scaling.
-    const [winW, winH] = win.getContentSize();
-    const image = await wc.capturePage();
+    // Capture only the webview content so all coordinates are webview-relative.
+    const webviewInfo = await getActiveWebviewWc();
+    if (!webviewInfo) return null;
+    const winW = Math.round(webviewInfo.w);
+    const winH = Math.round(webviewInfo.h);
+    const image = await webviewInfo.wc.capturePage();
     const resized = image.resize({ width: 1200 });
     const w = resized.getSize().width;
     const h = resized.getSize().height;
     const rawBase64 = resized.toDataURL();
-    const processedBase64 = await processScreenshotForAgent(rawBase64);
+    // Scale last click position from webview CSS pixels to resized-screenshot pixels.
+    const cursorInShot = lastCursorPos
+        ? { x: Math.round(lastCursorPos.x * (w / winW)), y: Math.round(lastCursorPos.y * (h / winH)) }
+        : undefined;
+    const processedBase64 = await processScreenshotForAgent(rawBase64, cursorInShot);
 
     // Save to disk for inspection
     const savePath = join(tmpdir(), "indus-agent-screenshot.jpg");
@@ -160,21 +163,21 @@ async function executeCommand(cmd: any): Promise<void> {
     if (cmd.type === "agent:new-tab") {
         mainWc.send("agent:new-tab", cmd.url);
     } else if (cmd.type === "agent:click") {
-        // sendInputEvent on the main WebContents does NOT reach <webview> guest pages
-        // (they are out-of-process). We must send to the guest WebContents directly,
-        // with coordinates relative to the webview, not the full window.
+        // cmd.x/y are already webview-relative (screenshot was captured from the webview).
+        // Send directly to the guest WebContents without any offset adjustment.
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) {
             console.error("Cannot click: no active webview found");
             return;
         }
-        const relX = Math.round(cmd.x - webviewInfo.x);
-        const relY = Math.round(cmd.y - webviewInfo.y);
+        const relX = cmd.x;
+        const relY = cmd.y;
+        lastCursorPos = { x: relX, y: relY };
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
-        // Flash cursor icon in the renderer at the window-space click position
-        mainWc.send("agent:cursor-flash", { x: cmd.x, y: cmd.y });
+        // Flash cursor in the renderer at window-space position (webview offset + relative coords)
+        mainWc.send("agent:cursor-flash", { x: Math.round(webviewInfo.x + relX), y: Math.round(webviewInfo.y + relY) });
     } else if (cmd.type === "agent:type") {
         for (const char of cmd.text) {
             mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
@@ -186,9 +189,8 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:scroll") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
-        const relX = Math.round(cmd.x - webviewInfo.x);
-        const relY = Math.round(cmd.y - webviewInfo.y);
-        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: relX, y: relY, deltaY: cmd.deltaY } as any);
+        // cmd.x/y are already webview-relative — no offset subtraction needed.
+        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaY: cmd.deltaY } as any);
     }
 }
 
@@ -204,8 +206,8 @@ if (!tool) return;
 
     let cmd: any;
     if (tool.name === "click") {
-        // translateCoordinates returns coords in the resized-screenshot space (1280px wide).
-        // Scale back to the logical window size (CSS pixels) for sendInputEvent.
+        // translateCoordinates maps grid labels → resized-screenshot space.
+        // Scale to webview CSS pixels (winW/winH = webview dimensions).
         const ssCoords = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
         const clickX = Math.round(ssCoords.x * (winW / ssW));
         const clickY = Math.round(ssCoords.y * (winH / ssH));
@@ -217,7 +219,7 @@ if (!tool) return;
     } else if (tool.name === "navigate") {
         cmd = { type: "agent:navigate", url: tool_arguments.url };
     } else if (tool.name === "scroll") {
-        // Scale scroll coordinates from screenshot space to logical window space.
+        // Scale scroll coordinates from screenshot space to webview CSS pixels.
         const scrollX = Math.round(tool_arguments.x * (winW / ssW));
         const scrollY = Math.round(tool_arguments.y * (winH / ssH));
         cmd = { type: "agent:scroll", x: scrollX, y: scrollY, deltaY: tool_arguments.deltaY };
@@ -230,6 +232,7 @@ if (!tool) return;
 }
 
 let past_actions = [];
+let lastCursorPos: { x: number; y: number } | null = null;
 
 /**
  * Waits for any DOM mutation in the active webview's guest page using
@@ -272,6 +275,7 @@ async function waitForDomChange(timeout: number): Promise<void> {
 
 export async function runAgentWithInstruction(instruction: string): Promise<void> {
     past_actions = [];
+    lastCursorPos = null;
     while (true) {
         console.log("Running agent with instruction:", instruction);
 

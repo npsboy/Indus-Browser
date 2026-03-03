@@ -17,7 +17,7 @@ function gridLabel(index: number): string {
     return `${Math.floor(index / 26) + 1}${letters[index % 26]}`;
 }
 
-export async function processScreenshotForAgent(base64Image: string): Promise<string> {
+export async function processScreenshotForAgent(base64Image: string, cursorPos?: { x: number; y: number }): Promise<string> {
     const raw = base64Image.replace(/^data:image\/\w+;base64,/, "");
     const buf = Buffer.from(raw, "base64");
 
@@ -137,7 +137,58 @@ export async function processScreenshotForAgent(base64Image: string): Promise<st
 
     lsvg += "</svg>";
 
-    // ── 6. Composite ───────────────────────────────────────────────────────────
+    // ── 6. Cursor overlay ──────────────────────────────────────────────────────
+    // If a cursor position is provided (in original W×H screenshot space),
+    // transform it into the output canvas space (accounting for quadrant split
+    // and label borders) and draw a visible crosshair+circle marker.
+    let cursorSvgBuf: Buffer | null = null;
+    if (cursorPos) {
+        const cx = cursorPos.x;
+        const cy = cursorPos.y;
+        // Determine which quadrant the cursor falls in and compute output coords.
+        let outCX: number;
+        let outCY: number;
+        if (cx < qW && cy < qH) {
+            outCX = q1x + cx;       outCY = q1y + cy;
+        } else if (cx >= qW && cy < qH) {
+            outCX = q2x + cx - qW;  outCY = q2y + cy;
+        } else if (cx < qW && cy >= qH) {
+            outCX = q3x + cx;       outCY = q3y + cy - qH;
+        } else {
+            outCX = q4x + cx - qW;  outCY = q4y + cy - qH;
+        }
+        const R = 14;  // outer ring radius
+        const r = 4;   // inner dot radius
+        const arm = R + 10; // crosshair arm length beyond ring
+        const cursorSvg =
+            `<svg width="${outW}" height="${outH}" xmlns="http://www.w3.org/2000/svg">` +
+            // Shadow/outline for contrast on any background
+            `<circle cx="${outCX}" cy="${outCY}" r="${R + 2}" fill="none" stroke="black" stroke-width="3" opacity="0.55"/>` +
+            `<line x1="${outCX - arm}" y1="${outCY}" x2="${outCX + arm}" y2="${outCY}" stroke="black" stroke-width="3" opacity="0.55"/>` +
+            `<line x1="${outCX}" y1="${outCY - arm}" x2="${outCX}" y2="${outCY + arm}" stroke="black" stroke-width="3" opacity="0.55"/>` +
+            // Bright ring + crosshair
+            `<circle cx="${outCX}" cy="${outCY}" r="${R}" fill="none" stroke="#ff4444" stroke-width="2"/>` +
+            `<line x1="${outCX - arm}" y1="${outCY}" x2="${outCX + arm}" y2="${outCY}" stroke="#ff4444" stroke-width="2"/>` +
+            `<line x1="${outCX}" y1="${outCY - arm}" x2="${outCX}" y2="${outCY + arm}" stroke="#ff4444" stroke-width="2"/>` +
+            // Inner filled dot
+            `<circle cx="${outCX}" cy="${outCY}" r="${r}" fill="#ff4444"/>` +
+            `</svg>`;
+        // Store cursor SVG buffer for the composite step below.
+        cursorSvgBuf = Buffer.from(cursorSvg);
+    }
+
+    // ── 7. Composite ──────────────────────────────────────────────────────────
+    const compositeInputs: sharp.OverlayOptions[] = [
+        { input: Buffer.from(lsvg), top: 0, left: 0 },   // BG + labels first
+        { input: q1, top: q1y, left: q1x },
+        { input: q2, top: q2y, left: q2x },
+        { input: q3, top: q3y, left: q3x },
+        { input: q4, top: q4y, left: q4x },
+    ];
+    if (cursorSvgBuf) {
+        compositeInputs.push({ input: cursorSvgBuf, top: 0, left: 0 });
+    }
+
     const outputBuf = await sharp({
         create: {
             width:  outW,
@@ -146,13 +197,7 @@ export async function processScreenshotForAgent(base64Image: string): Promise<st
             background: { r: 216, g: 216, b: 216 },
         },
     })
-        .composite([
-            { input: Buffer.from(lsvg), top: 0, left: 0 },   // BG + labels first
-            { input: q1, top: q1y, left: q1x },
-            { input: q2, top: q2y, left: q2x },
-            { input: q3, top: q3y, left: q3x },
-            { input: q4, top: q4y, left: q4x },
-        ])
+        .composite(compositeInputs)
         .jpeg({ quality: 65 })
         .toBuffer();
 

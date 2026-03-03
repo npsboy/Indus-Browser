@@ -309,7 +309,14 @@ function App() {
   useEffect(() => {
     if (!showMouseCoords) return;
     const handleMouseMove = (e: MouseEvent) => {
-      setMousePos({ x: Math.round(e.clientX), y: Math.round(e.clientY) });
+      // Report coordinates relative to the active webview, not the full window.
+      const wv = document.querySelector('webview[style*="display: flex"]');
+      if (wv) {
+        const rect = wv.getBoundingClientRect();
+        setMousePos({ x: Math.round(e.clientX - rect.left), y: Math.round(e.clientY - rect.top) });
+      } else {
+        setMousePos({ x: Math.round(e.clientX), y: Math.round(e.clientY) });
+      }
     };
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
