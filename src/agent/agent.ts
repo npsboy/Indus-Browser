@@ -50,6 +50,7 @@ async function GetAction(userPrompt:string, imageurl:string){
         body: JSON.stringify({ 
             messages: [
                 { role: "system", content: agentPrompt },
+                { role: "system", content: "Previous actions: " + past_actions.join("\n") },
                 { role: "user", content: `User task: "${userPrompt}"` }
             ],
             imageUrl: imageurl
@@ -231,7 +232,43 @@ if (!tool) return;
     return cmd;
 }
 
+let past_actions = [];
+
+/**
+ * Waits for the active webview's guest WebContents to emit any of
+ * did-navigate, did-navigate-in-page, or did-finish-load.
+ * Resolves early when one fires; falls back to the given timeout (ms).
+ */
+async function waitForWebviewUpdate(timeout: number): Promise<void> {
+    const webviewInfo = await getActiveWebviewWc();
+    if (!webviewInfo) {
+        // No webview found — just wait the full timeout
+        await new Promise(resolve => setTimeout(resolve, timeout));
+        return;
+    }
+    const guestWc = webviewInfo.wc;
+    return new Promise<void>(resolve => {
+        let resolved = false;
+        const done = () => {
+            if (resolved) return;
+            resolved = true;
+            cleanup();
+            resolve();
+        };
+        const cleanup = () => {
+            guestWc.off("did-navigate",         done);
+            guestWc.off("did-navigate-in-page", done);
+            guestWc.off("did-finish-load",      done);
+        };
+        guestWc.once("did-navigate",         done);
+        guestWc.once("did-navigate-in-page", done);
+        guestWc.once("did-finish-load",      done);
+        setTimeout(done, timeout);
+    });
+}
+
 export async function runAgentWithInstruction(instruction: string): Promise<void> {
+    past_actions = [];
     while (true) {
         console.log("Running agent with instruction:", instruction);
 
@@ -248,6 +285,13 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         console.log("Raw response from agent:", response);
         let tool = response?.tool || null;
         console.log("Agent selected tool:", tool);
+
+        let tool_arguments: any = {};
+        if (tool?.arguments) {
+            tool_arguments = typeof tool.arguments === "string"
+                ? JSON.parse(tool.arguments)
+                : tool.arguments;
+        }
 
         let cmd = getCommand(tool, winW, winH, ssW, ssH);
 
@@ -268,5 +312,11 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
 
         console.log("Executing command:", cmd);
         await executeCommand(cmd);
+
+        let description = tool_arguments.description || "No explanation provided.";
+        past_actions.push(description);
+
+        // Wait for the webview to update (navigation or load complete), timeout after 1.5s
+        await waitForWebviewUpdate(5000);
     }
 }
