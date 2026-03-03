@@ -138,7 +138,7 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     // that sendInputEvent expects, regardless of display DPR/scaling.
     const [winW, winH] = win.getContentSize();
     const image = await wc.capturePage();
-    const resized = image.resize({ width: 960 });
+    const resized = image.resize({ width: 1200 });
     const w = resized.getSize().width;
     const h = resized.getSize().height;
     const rawBase64 = resized.toDataURL();
@@ -193,23 +193,8 @@ async function executeCommand(cmd: any): Promise<void> {
     }
 }
 
-export async function runAgentWithInstruction(instruction: string): Promise<void> {
-    console.log("Running agent with instruction:", instruction);
-
-    const screenshotResult = await takeScreenshot();
-    if (!screenshotResult) {
-        console.error("Failed to take screenshot.");
-        return;
-    }
-    const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
-
-    const response = await GetAction(instruction, screenshot);
-    if (!response) return;
-
-    console.log("Raw response from agent:", response);
-    let tool = response?.tool || null;
-    console.log("Agent selected tool:", tool);
-    if (!tool) return;
+function getCommand(tool, winW, winH, ssW, ssH): any {
+if (!tool) return;
 
     let tool_arguments: any = {};
     if (tool?.arguments) {
@@ -230,7 +215,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
     } else if (tool.name === "type") {
         cmd = { type: "agent:type", text: tool_arguments.text };
     } else if (tool.name === "new-tab") {
-        cmd = { type: "agent:new-tab", url: tool_arguments.url ?? response.url };
+        cmd = { type: "agent:new-tab", url: tool_arguments.url};
     } else if (tool.name === "navigate") {
         cmd = { type: "agent:navigate", url: tool_arguments.url };
     } else if (tool.name === "scroll") {
@@ -238,13 +223,50 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
         const scrollX = Math.round(tool_arguments.x * (winW / ssW));
         const scrollY = Math.round(tool_arguments.y * (winH / ssH));
         cmd = { type: "agent:scroll", x: scrollX, y: scrollY, deltaY: tool_arguments.deltaY };
+    } else if (tool.name === "warn") {
+        cmd = { type: "agent:warn", message: tool_arguments.message };
+    } else if (tool.name === "final_answer") {
+        cmd = { type: "agent:final_answer", text: tool_arguments.answer };
     }
+    return cmd;
+}
 
-    if (!cmd) {
-        console.error("Unknown tool name:", tool.name);
-        return;
+export async function runAgentWithInstruction(instruction: string): Promise<void> {
+    while (true) {
+        console.log("Running agent with instruction:", instruction);
+
+        const screenshotResult = await takeScreenshot();
+        if (!screenshotResult) {
+            console.error("Failed to take screenshot.");
+            return;
+        }
+        const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
+
+        const response = await GetAction(instruction, screenshot);
+        if (!response) return;
+
+        console.log("Raw response from agent:", response);
+        let tool = response?.tool || null;
+        console.log("Agent selected tool:", tool);
+
+        let cmd = getCommand(tool, winW, winH, ssW, ssH);
+
+        if (!cmd) {
+            console.error("Unknown tool name:", tool.name);
+            return;
+        }
+
+        if (cmd.type === "agent:final_answer") {
+            console.log("Agent final answer:", cmd.text);
+            return;
+        }
+
+        if (cmd.type === "agent:warn") {
+            console.log("Agent warning:", cmd.message);
+            return;
+        }
+
+        console.log("Executing command:", cmd);
+        await executeCommand(cmd);
     }
-
-    console.log("Executing command:", cmd);
-    await executeCommand(cmd);
 }
