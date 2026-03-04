@@ -5,5 +5,7 @@ export type AgentCommand =
   | { type: "agent:click"; x: number; y: number }
   | { type: "agent:scroll"; x: number; y: number; deltaY: number }
   | { type: "agent:navigate"; url: string }
-  | { type: "agent:screenshot" };
+  | { type: "agent:screenshot" }
+  | { type: "agent:keypress"; key: string }
+  | { type: "agent:wait"; seconds: number };
 

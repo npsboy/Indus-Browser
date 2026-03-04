@@ -282,6 +282,15 @@ async function executeCommand(cmd: any): Promise<void> {
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: cmd.x, y: cmd.y, movementX: 0, movementY: 0 } as any);
         // cmd.x/y are already webview-relative — no offset subtraction needed.
         webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaX: cmd.deltaX ?? 0, deltaY: cmd.deltaY ?? 0, canScroll: true } as any);
+    } else if (cmd.type === "agent:keypress") {
+        const webviewInfo = await getActiveWebviewWc();
+        if (!webviewInfo) return;
+        webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode: cmd.key } as any);
+        webviewInfo.wc.sendInputEvent({ type: 'keyUp',   keyCode: cmd.key } as any);
+        console.log(`[Agent] Key pressed: ${cmd.key}`);
+    } else if (cmd.type === "agent:wait") {
+        console.log(`[Agent] Waiting ${cmd.seconds}s...`);
+        await new Promise<void>(resolve => setTimeout(resolve, cmd.seconds * 1000));
     }
 }
 
@@ -323,6 +332,10 @@ if (!tool) return;
         const deltaXPx = -Math.round((tool_arguments.delta_x ?? 0) * winW * STEP);
         const deltaYPx = -Math.round((tool_arguments.delta_y ?? 0) * winH * STEP);
         cmd = { type: "agent:scroll", x: scrollAtX, y: scrollAtY, deltaX: deltaXPx, deltaY: deltaYPx };
+    } else if (tool.name === "keypress") {
+        cmd = { type: "agent:keypress", key: tool_arguments.key };
+    } else if (tool.name === "wait") {
+        cmd = { type: "agent:wait", seconds: tool_arguments.seconds ?? 1 };
     } else if (tool.name === "warn") {
         cmd = { type: "agent:warn", message: tool_arguments.message };
     } else if (tool.name === "final_answer") {
