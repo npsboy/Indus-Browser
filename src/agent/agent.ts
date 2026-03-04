@@ -331,8 +331,7 @@ if (!tool) return;
     return cmd;
 }
 
-let past_actions: any[] = [];
-let past_action_explanations: string[] = [];
+let past_actions: { tool: string; parameters: any; explanation: string }[] = [];
 let lastCursorPos: { x: number; y: number } | null = null;
 
 let agentStopped = false;
@@ -414,7 +413,6 @@ async function waitForDomChange(timeout: number): Promise<void> {
 
 export async function runAgentWithInstruction(instruction: string): Promise<void> {
     past_actions = [];
-    past_action_explanations = [];
     lastCursorPos = null;
     agentStopped = false;
     agentPaused = false;
@@ -477,9 +475,12 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
             console.log("Executing command:", cmd);
             await executeCommand(cmd);
 
-            let explanation = tool_arguments.explanation || "No explanation provided.";
-            past_actions.push(tool);
-            past_action_explanations.push(explanation);
+            const explanation = tool_arguments.explanation || "No explanation provided.";
+            past_actions.push({
+                tool: tool.name,
+                parameters: tool_arguments,
+                explanation
+            });
             mainWc?.send("agent:action", explanation);
 
             // Wait for any DOM change in the webview, timeout after 1s
