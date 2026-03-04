@@ -41,7 +41,7 @@ async function computerUse(taskGoal:string, screenshot:string){
     return data;
 }
 
-async function GetAction(userPrompt:string, imageurl:string){
+async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string){
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
         method: "POST",
         headers: {
@@ -55,7 +55,7 @@ async function GetAction(userPrompt:string, imageurl:string){
                         ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
                         : "")
                 },
-                { role: "user", content: `User task: "${userPrompt}"` }
+                { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}` }
             ],
             imageUrl: imageurl
          })
@@ -451,7 +451,8 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
             if (agentStopped) break;
             if (await waitIfPaused()) break;
 
-            const response = await GetAction(instruction, screenshot);
+            const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
+            const response = await GetAction(instruction, screenshot, currentUrl);
             if (!response) break;
 
             let tool = response?.tool || null;
