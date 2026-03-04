@@ -108,31 +108,33 @@ async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: numb
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) return null;
 
-    // Ask the renderer for the active webview's bounding rect
-    const bounds: { x: number; y: number; w: number; h: number } | null =
+    // Ask the renderer for the active webview's bounding rect AND its WebContents ID
+    // so we can precisely identify the right WebContents when multiple tabs are open.
+    const info: { x: number; y: number; w: number; h: number; wcId: number } | null =
         await win.webContents.executeJavaScript(`
             (() => {
                 const wv = document.querySelector('webview[style*="display: flex"]');
                 if (!wv) return null;
                 const r = wv.getBoundingClientRect();
-                return { x: r.left, y: r.top, w: r.width, h: r.height };
+                return { x: r.left, y: r.top, w: r.width, h: r.height, wcId: wv.getWebContentsId() };
             })()
         `);
 
-    if (!bounds) {
+    if (!info) {
         console.error("Could not find active webview bounds");
         return null;
     }
 
-    // Find the guest WebContents for the active webview
-    const guestWc = allWebContents.getAllWebContents()
-        .find(wc => wc.getType() === "webview" && wc !== win.webContents);
+    // Use the exact WebContents ID from the active webview element — avoids picking
+    // the wrong tab's WebContents when multiple webviews exist.
+    const guestWc = allWebContents.fromId(info.wcId);
 
     if (!guestWc) {
         console.error("Could not find webview WebContents");
         return null;
     }
 
+    const { wcId: _id, ...bounds } = info;
     return { wc: guestWc, ...bounds };
 }
 
@@ -258,6 +260,9 @@ async function executeCommand(cmd: any): Promise<void> {
         const relX = snapped.x;
         const relY = snapped.y;
         lastCursorPos = { x: relX, y: relY };
+        // Ensure the OS window and the webview have focus so mouse events aren't dropped.
+        BrowserWindow.getAllWindows()[0]?.focus();
+        webviewInfo.wc.focus();
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
@@ -266,17 +271,20 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:type") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
-        for (const char of cmd.text) {
-            webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode: char });
-            webviewInfo.wc.sendInputEvent({ type: 'char',   keyCode: char });
-            webviewInfo.wc.sendInputEvent({ type: 'keyUp',  keyCode: char });
-        }
+        // Ensure the webview has focus so keystrokes aren't silently dropped.
+        BrowserWindow.getAllWindows()[0]?.focus();
+        webviewInfo.wc.focus();
+        // insertText() fires the native `input` event which React-controlled inputs
+        // (e.g. Amazon search) require to update their state. Raw keyDown/char/keyUp
+        // events alone are ignored by framework-managed inputs on many sites.
+        await webviewInfo.wc.insertText(cmd.text);
     } else if (cmd.type === "agent:navigate") {
         mainWc.send("agent:navigate", cmd.url);
     } else if (cmd.type === "agent:scroll") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
-        // Focus the webContents so scroll events are routed correctly.
+        // Focus both the OS window and the webContents so scroll events are routed correctly.
+        BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
         // Move mouse to the scroll target first so the renderer picks the right element.
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: cmd.x, y: cmd.y, movementX: 0, movementY: 0 } as any);
@@ -285,6 +293,9 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:keypress") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
+        // Ensure the webview has focus so key events aren't silently dropped.
+        BrowserWindow.getAllWindows()[0]?.focus();
+        webviewInfo.wc.focus();
         webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode: cmd.key } as any);
         webviewInfo.wc.sendInputEvent({ type: 'keyUp',   keyCode: cmd.key } as any);
         console.log(`[Agent] Key pressed: ${cmd.key}`);
