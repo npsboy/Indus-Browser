@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, use } from "react";
+import ReactMarkdown from "react-markdown";
 import "./App.css";
 import logo from "./assets/logos/Logo-White.png";
 import favicon from "./assets/logos/Favicon.png";
@@ -878,7 +879,9 @@ function App() {
                         <div className="chat-reply-header">
                           <img src={logo} alt="Indus" className="agent-action-logo" />
                         </div>
-                        <span className="chat-bubble chat-bubble-reply">{msg.text}</span>
+                        <div className="chat-bubble chat-bubble-reply markdown-content">
+                          <ReactMarkdown>{msg.text}</ReactMarkdown>
+                        </div>
                       </div>
                     );
                   }
@@ -896,7 +899,9 @@ function App() {
                           <div className="agent-action-dot" />
                           <div className="agent-action-connector" />
                         </div>
-                        <span className="agent-action-text">{msg.text}</span>
+                        <div className="agent-action-text markdown-content">
+                          <ReactMarkdown>{msg.text}</ReactMarkdown>
+                        </div>
                       </div>
                     </div>
                   );
