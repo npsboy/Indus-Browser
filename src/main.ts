@@ -1,7 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { runAgentWithInstruction } from "./agent/agent";
+import { runAgentWithInstruction, setAgentStopped, setAgentPaused } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -108,6 +108,18 @@ app.whenReady().then(createWindow);
 
 ipcMain.handle('agent:run-instruction', async (_event, instruction: string) => {
     await runAgent(instruction);
+});
+
+ipcMain.on('agent:stop', () => {
+    setAgentStopped(true);
+});
+
+ipcMain.on('agent:pause', () => {
+    setAgentPaused(true);
+});
+
+ipcMain.on('agent:resume', () => {
+    setAgentPaused(false);
 });
 
 let agentRunning = false;

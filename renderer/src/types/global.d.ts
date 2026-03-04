@@ -7,6 +7,10 @@ declare global {
       maximizeWindow: () => void;
       closeWindow: () => void;
       runAgentInstruction: (instruction: string) => Promise<void>;
+      stopAgent: () => void;
+      pauseAgent: () => void;
+      resumeAgent: () => void;
+      onAgentDone: (callback: () => void) => (() => void);
     };
   }
 }

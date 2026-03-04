@@ -65,6 +65,23 @@ function onAgentAction(callback: (_event: any, description: string) => void) {
   return () => ipcRenderer.removeListener("agent:action", callback);
 }
 
+function stopAgent() {
+  ipcRenderer.send('agent:stop');
+}
+
+function pauseAgent() {
+  ipcRenderer.send('agent:pause');
+}
+
+function resumeAgent() {
+  ipcRenderer.send('agent:resume');
+}
+
+function onAgentDone(callback: () => void) {
+  ipcRenderer.on('agent:done', callback);
+  return () => ipcRenderer.removeListener('agent:done', callback);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -79,5 +96,9 @@ contextBridge.exposeInMainWorld('api', {
     onAgentCloseActiveTab,
     runAgentInstruction,
     onAgentCursorFlash,
-    onAgentAction
+    onAgentAction,
+    stopAgent,
+    pauseAgent,
+    resumeAgent,
+    onAgentDone
 });

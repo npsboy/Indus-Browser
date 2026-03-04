@@ -52,7 +52,7 @@ async function GetAction(userPrompt:string, imageurl:string){
                 {
                     role: "system",
                     content: agentPrompt + (past_actions.length > 0
-                        ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${a}`).join("\n")
+                        ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
                         : "")
                 },
                 { role: "user", content: `User task: "${userPrompt}"` }
@@ -173,7 +173,7 @@ async function snapToClickable(
     targetX: number,
     targetY: number
 ): Promise<{ x: number; y: number }> {
-    const MAX_RADIUS = 80;
+    const MAX_RADIUS = 160;
     const CLICKABLE_ROLES = ["button","link","menuitem","menuitemcheckbox","menuitemradio","tab","checkbox","radio","option","combobox","listbox","switch","treeitem"];
 
     const result: { x: number; y: number } | null = await guestWc.executeJavaScript(`
@@ -264,18 +264,24 @@ async function executeCommand(cmd: any): Promise<void> {
         // Flash cursor in the renderer at window-space position (webview offset + relative coords)
         mainWc.send("agent:cursor-flash", { x: Math.round(webviewInfo.x + relX), y: Math.round(webviewInfo.y + relY) });
     } else if (cmd.type === "agent:type") {
+        const webviewInfo = await getActiveWebviewWc();
+        if (!webviewInfo) return;
         for (const char of cmd.text) {
-            mainWc.sendInputEvent({ type: 'keyDown', keyCode: char });
-            mainWc.sendInputEvent({ type: 'char',   keyCode: char });
-            mainWc.sendInputEvent({ type: 'keyUp',  keyCode: char });
+            webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode: char });
+            webviewInfo.wc.sendInputEvent({ type: 'char',   keyCode: char });
+            webviewInfo.wc.sendInputEvent({ type: 'keyUp',  keyCode: char });
         }
     } else if (cmd.type === "agent:navigate") {
         mainWc.send("agent:navigate", cmd.url);
     } else if (cmd.type === "agent:scroll") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
+        // Focus the webContents so scroll events are routed correctly.
+        webviewInfo.wc.focus();
+        // Move mouse to the scroll target first so the renderer picks the right element.
+        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: cmd.x, y: cmd.y, movementX: 0, movementY: 0 } as any);
         // cmd.x/y are already webview-relative — no offset subtraction needed.
-        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaY: cmd.deltaY } as any);
+        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaX: cmd.deltaX ?? 0, deltaY: cmd.deltaY ?? 0, canScroll: true } as any);
     }
 }
 
@@ -304,10 +310,19 @@ if (!tool) return;
     } else if (tool.name === "navigate") {
         cmd = { type: "agent:navigate", url: tool_arguments.url };
     } else if (tool.name === "scroll") {
-        // Scale scroll coordinates from screenshot space to webview CSS pixels.
-        const scrollX = Math.round(tool_arguments.x * (winW / ssW));
-        const scrollY = Math.round(tool_arguments.y * (winH / ssH));
-        cmd = { type: "agent:scroll", x: scrollX, y: scrollY, deltaY: tool_arguments.deltaY };
+        // x/y are grid label coords (same as click) — translate to webview CSS pixels.
+        const ssPos = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
+        const scrollAtX = Math.round(ssPos.x * (winW / ssW));
+        const scrollAtY = Math.round(ssPos.y * (winH / ssH));
+        // delta_x/delta_y are column/row counts (can be negative).
+        // One column = winW * STEP pixels; one row = winH * STEP pixels.
+        // NOTE: Electron's sendInputEvent mouseWheel uses Chromium's internal convention
+        // which is inverted vs the web WheelEvent: positive deltaY = scroll UP.
+        // Negate so that a positive agent delta_y (meaning "scroll down") works correctly.
+        const STEP = 0.015;
+        const deltaXPx = -Math.round((tool_arguments.delta_x ?? 0) * winW * STEP);
+        const deltaYPx = -Math.round((tool_arguments.delta_y ?? 0) * winH * STEP);
+        cmd = { type: "agent:scroll", x: scrollAtX, y: scrollAtY, deltaX: deltaXPx, deltaY: deltaYPx };
     } else if (tool.name === "warn") {
         cmd = { type: "agent:warn", message: tool_arguments.message };
     } else if (tool.name === "final_answer") {
@@ -316,8 +331,23 @@ if (!tool) return;
     return cmd;
 }
 
-let past_actions = [];
+let past_actions: any[] = [];
+let past_action_explanations: string[] = [];
 let lastCursorPos: { x: number; y: number } | null = null;
+
+let agentStopped = false;
+let agentPaused = false;
+
+export function setAgentStopped(v: boolean) { agentStopped = v; }
+export function setAgentPaused(v: boolean) { agentPaused = v; }
+
+/** Pauses the loop until unpaused or stopped. Returns true if the agent was stopped. */
+async function waitIfPaused(): Promise<boolean> {
+    while (agentPaused && !agentStopped) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    return agentStopped;
+}
 
 /**
  * Waits for the DOM in the active webview's guest page to settle after an action.
@@ -384,55 +414,78 @@ async function waitForDomChange(timeout: number): Promise<void> {
 
 export async function runAgentWithInstruction(instruction: string): Promise<void> {
     past_actions = [];
+    past_action_explanations = [];
     lastCursorPos = null;
-    while (true) {
-        console.log("Running agent with instruction:", instruction);
+    agentStopped = false;
+    agentPaused = false;
+    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    try {
+        while (true) {
+            // Check stop flag
+            if (agentStopped) break;
 
-        const screenshotResult = await takeScreenshot();
-        if (!screenshotResult) {
-            console.error("Failed to take screenshot.");
-            return;
+            // Wait if paused (returns true if stopped while paused)
+            if (await waitIfPaused()) break;
+
+            console.log("Running agent with instruction:", instruction);
+
+            const screenshotResult = await takeScreenshot();
+            if (!screenshotResult) {
+                console.error("Failed to take screenshot.");
+                break;
+            }
+            const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
+
+            if (agentStopped) break;
+            if (await waitIfPaused()) break;
+
+            const response = await GetAction(instruction, screenshot);
+            if (!response) break;
+
+            let tool = response?.tool || null;
+            console.log("Agent selected tool:", tool);
+
+            let tool_arguments: any = {};
+            if (tool?.arguments) {
+                tool_arguments = typeof tool.arguments === "string"
+                    ? JSON.parse(tool.arguments)
+                    : tool.arguments;
+            }
+
+            let cmd = getCommand(tool, winW, winH, ssW, ssH);
+
+            if (!cmd) {
+                console.error("Unknown tool name:", tool.name);
+                break;
+            }
+
+            if (cmd.type === "agent:final_answer") {
+                console.log("Agent final answer:", cmd.text);
+                break;
+            }
+
+            if (cmd.type === "agent:warn") {
+                console.log("Agent warning:", cmd.message);
+                break;
+            }
+
+            if (agentStopped) break;
+            if (await waitIfPaused()) break;
+
+            console.log("Executing command:", cmd);
+            await executeCommand(cmd);
+
+            let explanation = tool_arguments.explanation || "No explanation provided.";
+            past_actions.push(tool);
+            past_action_explanations.push(explanation);
+            mainWc?.send("agent:action", explanation);
+
+            // Wait for any DOM change in the webview, timeout after 1s
+            await waitForDomChange(1500);
         }
-        const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
-
-        const response = await GetAction(instruction, screenshot);
-        if (!response) return;
-
-        let tool = response?.tool || null;
-        console.log("Agent selected tool:", tool);
-
-        let tool_arguments: any = {};
-        if (tool?.arguments) {
-            tool_arguments = typeof tool.arguments === "string"
-                ? JSON.parse(tool.arguments)
-                : tool.arguments;
-        }
-
-        let cmd = getCommand(tool, winW, winH, ssW, ssH);
-
-        if (!cmd) {
-            console.error("Unknown tool name:", tool.name);
-            return;
-        }
-
-        if (cmd.type === "agent:final_answer") {
-            console.log("Agent final answer:", cmd.text);
-            return;
-        }
-
-        if (cmd.type === "agent:warn") {
-            console.log("Agent warning:", cmd.message);
-            return;
-        }
-
-        console.log("Executing command:", cmd);
-        await executeCommand(cmd);
-
-        let explanation = tool_arguments.explanation || "No explanation provided.";
-        past_actions.push(explanation);
-        BrowserWindow.getAllWindows()[0]?.webContents.send("agent:action", explanation);
-
-        // Wait for any DOM change in the webview, timeout after 1s
-        await waitForDomChange(1500);
+    } finally {
+        agentStopped = false;
+        agentPaused = false;
+        mainWc?.send("agent:done");
     }
 }

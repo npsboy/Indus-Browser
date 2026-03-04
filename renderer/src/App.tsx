@@ -16,6 +16,9 @@ import closeIcon from "./assets/Icons/Close-Grey.png";
 import profilePic from "./assets/Images/Profile-Pictures/Profile-Picture-1.jpg";
 import loadingAnimation from "./assets/Icons/loading-animation.gif";
 import cursorIcon from "./assets/Icons/cursor-white.png";
+import stopIcon from "./assets/Icons/Stop-white.png";
+import pauseIcon from "./assets/Icons/Pause-White.png";
+import playIcon from "./assets/Icons/Play-White.png";
 
 function App() {
 
@@ -331,6 +334,8 @@ function App() {
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
   const [platform, setPlatform] = useState<'win32' | 'darwin' | 'linux'>('win32');
   const [tabWidth, setTabWidth] = useState(240);
+  const [isAgentRunning, setIsAgentRunning] = useState(false);
+  const [isAgentPaused, setIsAgentPaused] = useState(false);
 
   // Sidebar resizing state
   const [sidebarWidth, setSidebarWidth] = useState(350);
@@ -382,7 +387,25 @@ function App() {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
+    setIsAgentRunning(true);
+    setIsAgentPaused(false);
     (window as any).api?.runAgentInstruction(text);
+  }
+
+  function handleAgentStop() {
+    (window as any).api?.stopAgent();
+    setIsAgentRunning(false);
+    setIsAgentPaused(false);
+  }
+
+  function handleAgentPause() {
+    (window as any).api?.pauseAgent();
+    setIsAgentPaused(true);
+  }
+
+  function handleAgentResume() {
+    (window as any).api?.resumeAgent();
+    setIsAgentPaused(false);
   }
 
   useEffect(() => {
@@ -395,6 +418,14 @@ function App() {
   useEffect(() => {
     const cleanup = (window as any).api?.onAgentAction((_event: any, description: string) => {
       setChatMessages(prev => [...prev, { role: 'agent', text: description }]);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = (window as any).api?.onAgentDone(() => {
+      setIsAgentRunning(false);
+      setIsAgentPaused(false);
     });
     return () => cleanup?.();
   }, []);
@@ -840,6 +871,17 @@ function App() {
             </div>
             
             <div className="assistant-input-container">
+              {isAgentRunning && (
+                <div className="agent-control-row">
+                  <button
+                    className="agent-control-button"
+                    onClick={isAgentPaused ? handleAgentResume : handleAgentPause}
+                    title={isAgentPaused ? "Resume" : "Pause"}
+                  >
+                    <img src={isAgentPaused ? playIcon : pauseIcon} alt={isAgentPaused ? "Resume" : "Pause"} />
+                  </button>
+                </div>
+              )}
               <div className="assistant-input-row">
                 <textarea 
                   ref={textareaRef}
@@ -857,7 +899,13 @@ function App() {
                     }
                   }}
                 />
-                <button className="assistant-send-button" onClick={handleAgentSend}>➤</button>
+                {isAgentRunning ? (
+                  <button className="agent-stop-button" onClick={handleAgentStop} title="Stop">
+                    <img src={stopIcon} alt="Stop" />
+                  </button>
+                ) : (
+                  <button className="assistant-send-button" onClick={handleAgentSend}>➤</button>
+                )}
               </div>
               <div className="assistant-input-footer">
                 <button className="assistant-attach-button" title="Attach file">
