@@ -10,7 +10,7 @@ declare global {
       stopAgent: () => void;
       pauseAgent: () => void;
       resumeAgent: () => void;
-      onAgentDone: (callback: () => void) => (() => void);
+      onAgentDone: (callback: (_event: any, answer: string) => void) => (() => void);
     };
   }
 }

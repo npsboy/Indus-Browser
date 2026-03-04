@@ -419,6 +419,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
     agentStopped = false;
     agentPaused = false;
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    let finalAnswer = "";
     try {
         while (true) {
             // Check stop flag
@@ -461,6 +462,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
 
             if (cmd.type === "agent:final_answer") {
                 console.log("Agent final answer:", cmd.text);
+                finalAnswer = cmd.text || "";
                 break;
             }
 
@@ -486,6 +488,6 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
     } finally {
         agentStopped = false;
         agentPaused = false;
-        mainWc?.send("agent:done");
+        mainWc?.send("agent:done", finalAnswer);
     }
 }

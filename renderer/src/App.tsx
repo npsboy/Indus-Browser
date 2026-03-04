@@ -324,7 +324,7 @@ function App() {
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [showMouseCoords]);
-  type ChatMessage = { role: 'user' | 'agent'; text: string };
+  type ChatMessage = { role: 'user' | 'agent' | 'reply'; text: string };
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -423,9 +423,12 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentDone(() => {
+    const cleanup = (window as any).api?.onAgentDone((_event: any, answer: string) => {
       setIsAgentRunning(false);
       setIsAgentPaused(false);
+      if (answer && answer.trim()) {
+        setChatMessages(prev => [...prev, { role: 'reply', text: answer.trim() }]);
+      }
     });
     return () => cleanup?.();
   }, []);
@@ -861,11 +864,43 @@ function App() {
                   <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
                 </div>
               ) : (
-                chatMessages.map((msg, i) => (
-                  <div key={i} className={`chat-message chat-message-${msg.role}`}>
-                    <span className="chat-bubble">{msg.text}</span>
-                  </div>
-                ))
+                chatMessages.map((msg, i) => {
+                  if (msg.role === 'user') {
+                    return (
+                      <div key={i} className="chat-message chat-message-user">
+                        <span className="chat-bubble">{msg.text}</span>
+                      </div>
+                    );
+                  }
+                  if (msg.role === 'reply') {
+                    return (
+                      <div key={i} className="chat-message chat-message-reply">
+                        <div className="chat-reply-header">
+                          <img src={logo} alt="Indus" className="agent-action-logo" />
+                        </div>
+                        <span className="chat-bubble chat-bubble-reply">{msg.text}</span>
+                      </div>
+                    );
+                  }
+                  const isFirst = i === 0 || chatMessages[i - 1].role !== 'agent';
+                  const isLast = i === chatMessages.length - 1 || chatMessages[i + 1].role !== 'agent';
+                  return (
+                    <div key={i} className={`agent-action-item${isFirst ? ' agent-action-first' : ''}${isLast ? ' agent-action-last' : ''}`}>
+                      {isFirst && (
+                        <div className="agent-action-header">
+                          <img src={logo} alt="Indus" className="agent-action-logo" />
+                        </div>
+                      )}
+                      <div className="agent-action-step">
+                        <div className="agent-action-line-wrap">
+                          <div className="agent-action-dot" />
+                          <div className="agent-action-connector" />
+                        </div>
+                        <span className="agent-action-text">{msg.text}</span>
+                      </div>
+                    </div>
+                  );
+                })
               )}
               <div ref={chatEndRef} />
             </div>

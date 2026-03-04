@@ -77,7 +77,7 @@ function resumeAgent() {
   ipcRenderer.send('agent:resume');
 }
 
-function onAgentDone(callback: () => void) {
+function onAgentDone(callback: (_event: any, answer: string) => void) {
   ipcRenderer.on('agent:done', callback);
   return () => ipcRenderer.removeListener('agent:done', callback);
 }
