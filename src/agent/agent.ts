@@ -344,7 +344,7 @@ if (!tool) return;
     return cmd;
 }
 
-let past_actions: { tool: string; parameters: any; explanation: string }[] = [];
+let past_actions: { tool: string; parameters: any; explanation: string; result?: string }[] = [];
 let lastCursorPos: { x: number; y: number } | null = null;
 
 let agentStopped = false;
@@ -489,11 +489,40 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
             console.log("Executing command:", cmd);
             await executeCommand(cmd);
 
+            // After a click, capture what element is now focused so the LLM
+            // can confirm the click landed on a search/input box and won't re-click it.
+            let actionResult: string | undefined;
+            if (cmd.type === "agent:click") {
+                const webviewInfo = await getActiveWebviewWc();
+                if (webviewInfo) {
+                    actionResult = await webviewInfo.wc.executeJavaScript(`
+                        (() => {
+                            const el = document.activeElement;
+                            if (!el || el === document.body || el === document.documentElement) return "focused: nothing";
+                            const tag = el.tagName.toLowerCase();
+                            const type = el.getAttribute('type') || '';
+                            const placeholder = el.getAttribute('placeholder') || '';
+                            const role = el.getAttribute('role') || '';
+                            const id = el.id ? '#' + el.id : '';
+                            const name = el.getAttribute('name') || '';
+                            const parts = [tag];
+                            if (type) parts.push('[type=' + type + ']');
+                            if (id) parts.push(id);
+                            if (name) parts.push('[name=' + name + ']');
+                            if (role) parts.push('[role=' + role + ']');
+                            if (placeholder) parts.push('placeholder="' + placeholder + '"');
+                            return 'focused: ' + parts.join('');
+                        })()
+                    `).catch(() => undefined);
+                }
+            }
+
             const explanation = tool_arguments.explanation || "No explanation provided.";
             past_actions.push({
                 tool: tool.name,
                 parameters: tool_arguments,
-                explanation
+                explanation,
+                ...(actionResult !== undefined ? { result: actionResult } : {})
             });
             mainWc?.send("agent:action", explanation);
 
