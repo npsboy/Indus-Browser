@@ -296,9 +296,32 @@ async function executeCommand(cmd: any): Promise<void> {
         // Ensure the webview has focus so key events aren't silently dropped.
         BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
-        webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode: cmd.key } as any);
-        webviewInfo.wc.sendInputEvent({ type: 'keyUp',   keyCode: cmd.key } as any);
-        console.log(`[Agent] Key pressed: ${cmd.key}`);
+
+        // Parse modifier+key combinations like "ctrl+a", "ctrl+shift+t", etc.
+        const MODIFIER_MAP: Record<string, string> = {
+            ctrl: 'control', control: 'control',
+            shift: 'shift',
+            alt: 'alt',
+            meta: 'meta', cmd: 'meta', win: 'meta',
+        };
+        const parts = cmd.key.toLowerCase().split('+');
+        const modifiers: string[] = [];
+        let keyCode = cmd.key; // fallback to raw value
+        if (parts.length > 1) {
+            const keyPart = parts[parts.length - 1];
+            const modParts = parts.slice(0, -1);
+            modParts.forEach(p => {
+                if (MODIFIER_MAP[p]) modifiers.push(MODIFIER_MAP[p]);
+            });
+            // Preserve original casing of the key character
+            const originalParts = cmd.key.split('+');
+            keyCode = originalParts[originalParts.length - 1];
+        }
+
+        const eventBase = modifiers.length > 0 ? { modifiers } : {};
+        webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode, ...eventBase } as any);
+        webviewInfo.wc.sendInputEvent({ type: 'keyUp',   keyCode, ...eventBase } as any);
+        console.log(`[Agent] Key pressed: ${cmd.key}${modifiers.length ? ` (modifiers: ${modifiers.join('+')})` : ''}`);
     } else if (cmd.type === "agent:wait") {
         console.log(`[Agent] Waiting ${cmd.seconds}s...`);
         await new Promise<void>(resolve => setTimeout(resolve, cmd.seconds * 1000));
