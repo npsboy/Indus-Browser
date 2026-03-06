@@ -41,7 +41,10 @@ async function computerUse(taskGoal:string, screenshot:string){
     return data;
 }
 
-async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string){
+async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string, openTabs?: { id: string; url: string; title?: string; isActive: boolean }[]){
+    const tabsContext = openTabs && openTabs.length > 0
+        ? `\nOpen tabs:\n${openTabs.map((t, i) => `  ${t.isActive ? '[active] ' : ''}Tab ${i + 1}: ${t.title || 'Untitled'} — ${t.url}`).join('\n')}`
+        : "";
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
         method: "POST",
         headers: {
@@ -55,7 +58,7 @@ async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string
                         ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
                         : "")
                 },
-                { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}` }
+                { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${tabsContext}` }
             ],
             imageUrl: imageurl
          })
@@ -311,7 +314,18 @@ async function executeCommand(cmd: any): Promise<void> {
         }
     } else if (cmd.type === "agent:navigate") {
         if (cmd.new_tab !== false) {
-            mainWc.send("agent:new-tab", cmd.url);
+            // If the URL is already open in a tab, switch to it instead of opening a new one.
+            const mainWin = BrowserWindow.getAllWindows()[0];
+            const openTabs: { id: string; url: string; isActive: boolean }[] = mainWin
+                ? await mainWin.webContents.executeJavaScript('window.__tabs || []').catch(() => [])
+                : [];
+            const normalize = (u: string) => u.replace(/\/$/, "");
+            const existingTab = openTabs.find(t => normalize(t.url) === normalize(cmd.url));
+            if (existingTab) {
+                mainWc.send("agent:switch-to-tab", cmd.url);
+            } else {
+                mainWc.send("agent:new-tab", cmd.url);
+            }
         } else {
             mainWc.send("agent:navigate", cmd.url);
         }
@@ -540,7 +554,9 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
             if (await waitIfPaused()) break;
 
             const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
-            const response = await GetAction(instruction, screenshot, currentUrl);
+            const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
+                mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
+            const response = await GetAction(instruction, screenshot, currentUrl, openTabs);
             if (!response) break;
 
             let tool = response?.tool || null;

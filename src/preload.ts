@@ -51,6 +51,11 @@ function onAgentCloseActiveTab(callback: () => void) {
   return () => ipcRenderer.removeListener("agent:close-active-tab", callback);
 }
 
+function onAgentSwitchToTab(callback: (_event: any, url: string) => void) {
+  ipcRenderer.on("agent:switch-to-tab", callback);
+  return () => ipcRenderer.removeListener("agent:switch-to-tab", callback);
+}
+
 function runAgentInstruction(instruction: string): Promise<void> {
   return ipcRenderer.invoke('agent:run-instruction', instruction);
 }
@@ -94,6 +99,7 @@ contextBridge.exposeInMainWorld('api', {
     onAgentNewTab,
     onAgentReloadActiveTab,
     onAgentCloseActiveTab,
+    onAgentSwitchToTab,
     runAgentInstruction,
     onAgentCursorFlash,
     onAgentAction,

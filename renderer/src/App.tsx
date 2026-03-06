@@ -103,6 +103,11 @@ function App() {
     tabsRef.current = tabs;
   }, [tabs]);
 
+  // Expose tabs to the main process via executeJavaScript
+  useEffect(() => {
+    (window as any).__tabs = tabs.map(t => ({ id: t.id, url: t.url, title: t.title, isActive: t.isActive }));
+  }, [tabs]);
+
   const webviewRefs = useRef<Map<string, HTMLWebViewElement>>(new Map());
   const webviewContainerRef = useRef<HTMLDivElement>(null);
   //maps tab id to webview element inside .current
@@ -640,6 +645,14 @@ function App() {
         closeTab(activeTabId);
       }
     });
+  }, []);
+
+  useEffect(() => {
+    const cleanup = (window as any).api?.onAgentSwitchToTab((_event: any, url: string) => {
+      const tab = tabsRef.current.find(t => t.url === url);
+      if (tab) activateTab(tab.id);
+    });
+    return () => cleanup?.();
   }, []);
 
   return (
