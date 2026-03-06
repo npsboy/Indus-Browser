@@ -310,7 +310,11 @@ async function executeCommand(cmd: any): Promise<void> {
             await new Promise<void>(r => setTimeout(r, 30));
         }
     } else if (cmd.type === "agent:navigate") {
-        mainWc.send("agent:navigate", cmd.url);
+        if (cmd.new_tab !== false) {
+            mainWc.send("agent:new-tab", cmd.url);
+        } else {
+            mainWc.send("agent:navigate", cmd.url);
+        }
     } else if (cmd.type === "agent:scroll") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
@@ -401,7 +405,7 @@ if (!tool) return;
     } else if (tool.name === "new-tab") {
         cmd = { type: "agent:new-tab", url: tool_arguments.url};
     } else if (tool.name === "navigate") {
-        cmd = { type: "agent:navigate", url: tool_arguments.url };
+        cmd = { type: "agent:navigate", url: tool_arguments.url, new_tab: tool_arguments.new_tab !== false };
     } else if (tool.name === "scroll") {
         // x/y are grid label coords (same as click) — translate to webview CSS pixels.
         const ssPos = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
