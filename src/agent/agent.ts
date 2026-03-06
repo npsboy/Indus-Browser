@@ -265,7 +265,19 @@ async function executeCommand(cmd: any): Promise<void> {
         webviewInfo.wc.focus();
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
+        // Small delay between mouseDown and mouseUp simulates a realistic click duration.
+        // Without it, some sites (e.g. Amazon) treat the pair as a phantom and ignore it.
+        await new Promise<void>(r => setTimeout(r, 60));
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp',   x: relX, y: relY, button: 'left', clickCount: 1 });
+        // Electron's sendInputEvent does NOT synthesize a DOM `click` event from
+        // mouseDown+mouseUp. React and many other frameworks only listen for `click`,
+        // so dispatch one via JS as a reliable fallback.
+        await webviewInfo.wc.executeJavaScript(
+            `(function(){
+                const el = document.elementFromPoint(${relX}, ${relY});
+                if (el) el.click();
+            })()`
+        ).catch(() => {});
         // Flash cursor in the renderer at window-space position (webview offset + relative coords)
         mainWc.send("agent:cursor-flash", { x: Math.round(webviewInfo.x + relX), y: Math.round(webviewInfo.y + relY) });
     } else if (cmd.type === "agent:type") {
@@ -274,10 +286,29 @@ async function executeCommand(cmd: any): Promise<void> {
         // Ensure the webview has focus so keystrokes aren't silently dropped.
         BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
-        // insertText() fires the native `input` event which React-controlled inputs
-        // (e.g. Amazon search) require to update their state. Raw keyDown/char/keyUp
-        // events alone are ignored by framework-managed inputs on many sites.
-        await webviewInfo.wc.insertText(cmd.text);
+
+        // Send each character as a full keyDown → insertText → keyUp sequence.
+        // - keyDown/keyUp fire the keyboard events that game/canvas sites (e.g. Wordle)
+        //   listen to on document/window — insertText() alone is invisible to them.
+        // - insertText() fires the native `input` event that React-controlled inputs
+        //   require to update their state.
+        // Together this covers both cases without double-typing.
+        const KEY_CODE_MAP: Record<string, string> = {
+            '\n': 'Return', '\r': 'Return', '\t': 'Tab', ' ': 'Space',
+            '\b': 'Backspace',
+        };
+        for (const char of cmd.text) {
+            const keyCode = KEY_CODE_MAP[char] ?? char;
+            webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode } as any);
+            if (!(char in KEY_CODE_MAP)) {
+                // insertText only for printable characters; special keys are handled
+                // entirely by keyDown/keyUp.
+                await webviewInfo.wc.insertText(char);
+            }
+            webviewInfo.wc.sendInputEvent({ type: 'keyUp', keyCode } as any);
+            // Small inter-character delay so rapid keydown events aren't dropped.
+            await new Promise<void>(r => setTimeout(r, 30));
+        }
     } else if (cmd.type === "agent:navigate") {
         mainWc.send("agent:navigate", cmd.url);
     } else if (cmd.type === "agent:scroll") {
@@ -319,7 +350,26 @@ async function executeCommand(cmd: any): Promise<void> {
         }
 
         const eventBase = modifiers.length > 0 ? { modifiers } : {};
+
+        // Map well-known key names to their char equivalents so the `char` event
+        // (which fires the DOM `keypress` event) contains the right character.
+        // This is what React/framework handlers on sites like Amazon listen for.
+        const KEY_TO_CHAR: Record<string, string> = {
+            Return: '\r', Enter: '\r',
+            Tab: '\t',
+            Space: ' ', ' ': ' ',
+            Backspace: '\b',
+            Escape: '\x1b',
+        };
+        const charValue = KEY_TO_CHAR[keyCode] ?? (keyCode.length === 1 ? keyCode : null);
+
         webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode, ...eventBase } as any);
+        // The `char` event is what actually fires the DOM `keypress` event.
+        // Without it, React/jQuery handlers on many sites (e.g. Amazon search submit)
+        // never receive the keystroke.
+        if (charValue) {
+            webviewInfo.wc.sendInputEvent({ type: 'char', keyCode: charValue, ...eventBase } as any);
+        }
         webviewInfo.wc.sendInputEvent({ type: 'keyUp',   keyCode, ...eventBase } as any);
         console.log(`[Agent] Key pressed: ${cmd.key}${modifiers.length ? ` (modifiers: ${modifiers.join('+')})` : ''}`);
     } else if (cmd.type === "agent:wait") {
