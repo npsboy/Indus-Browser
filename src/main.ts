@@ -74,6 +74,13 @@ function createWindow() {
         // Skip the main window's webContents — already handled above
         if (contents === win.webContents) return;
         attachShortcutHandler(contents);
+
+        // Intercept new-window requests from webview guests (target="_blank", window.open)
+        // and route them to the renderer to open in a new tab instead of a new BrowserWindow
+        contents.setWindowOpenHandler((details) => {
+            win.webContents.send("browser:open-url-in-new-tab", details.url);
+            return { action: "deny" };
+        });
     });
     
 }

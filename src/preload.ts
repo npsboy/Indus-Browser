@@ -87,6 +87,11 @@ function onAgentDone(callback: (_event: any, answer: string) => void) {
   return () => ipcRenderer.removeListener('agent:done', callback);
 }
 
+function onOpenUrlInNewTab(callback: (_event: any, url: string) => void) {
+  ipcRenderer.on('browser:open-url-in-new-tab', callback);
+  return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -106,5 +111,6 @@ contextBridge.exposeInMainWorld('api', {
     stopAgent,
     pauseAgent,
     resumeAgent,
-    onAgentDone
+    onAgentDone,
+    onOpenUrlInNewTab
 });

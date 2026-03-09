@@ -118,14 +118,13 @@ function App() {
     const currentRefs = webviewRefs.current;
     
     const handlers = new Map<string, { 
-      domReady: () => void;
       navigate: (e: any) => void; 
       navigateInPage: (e: any) => void; 
       finishLoad: () => void;
       startLoading: () => void;
-      newWindow: (e: any) => void;
       titleUpdated: (e: any) => void;
       contextMenu: (e: any) => void;
+      newWindow: (e: any) => void;
     }>();
 
     tabs.forEach((tab) => {
@@ -133,12 +132,12 @@ function App() {
       if (el) {
 
 
-        const domReadyHandler = () => {
-          (el as any).setWindowOpenHandler((details: any) => {
-            addTab(details.url);
-            return { action: "deny" };
-          });
-        }
+        const newWindowHandler = (e: any) => {
+          e.preventDefault();
+          if (e.url) {
+            addTab(e.url);
+          }
+        };
 
         const startLoadingHandler = () => {
           setTabs((currentTabs) =>
@@ -162,12 +161,6 @@ function App() {
             )
           );
         };
-
-        function newWindowHandler(e: any) {
-          alert("Opening new windows is disabled in this browser.");
-          e.preventDefault();
-          addTab(e.url);
-        }
 
         const titleUpdatedHandler = (e: any) => {
           setTabs((currentTabs) =>
@@ -274,21 +267,18 @@ function App() {
         el.addEventListener('did-navigate', navigateHandler);
         el.addEventListener('did-navigate-in-page', navigateInPageHandler);
         el.addEventListener('did-finish-load', finishLoadHandler);
-        el.addEventListener('new-window', newWindowHandler);
         el.addEventListener('page-title-updated', titleUpdatedHandler);
         el.addEventListener('context-menu', contextMenuHandler);
-
-        el.addEventListener('dom-ready', domReadyHandler);
+        el.addEventListener('new-window', newWindowHandler);
 
         handlers.set(tab.id, {
           startLoading: startLoadingHandler,
           navigate: navigateHandler,
           navigateInPage: navigateInPageHandler,
           finishLoad: finishLoadHandler,
-          newWindow: newWindowHandler,
           titleUpdated: titleUpdatedHandler,
           contextMenu: contextMenuHandler,
-          domReady: domReadyHandler
+          newWindow: newWindowHandler
         });
       }
     });
@@ -302,9 +292,9 @@ function App() {
           el.removeEventListener('did-navigate', h.navigate);
           el.removeEventListener('did-navigate-in-page', h.navigateInPage);
           el.removeEventListener('did-finish-load', h.finishLoad);
-          el.removeEventListener('new-window', h.newWindow);
           el.removeEventListener('page-title-updated', h.titleUpdated);
           el.removeEventListener('context-menu', h.contextMenu);
+          el.removeEventListener('new-window', h.newWindow);
         }
       });
     };
@@ -655,6 +645,14 @@ function App() {
     return () => cleanup?.();
   }, []);
 
+  // Handle new-tab requests from webview guests via main process
+  useEffect(() => {
+    const cleanup = (window as any).api?.onOpenUrlInNewTab((_event: any, url: string) => {
+      if (url) addTab(url);
+    });
+    return () => cleanup?.();
+  }, []);
+
   return (
     <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
       {/* Agent click cursor flash */}
@@ -852,6 +850,8 @@ function App() {
             }}
             key={tab.id}
             src={tab.url}
+            // @ts-ignore
+            allowpopups="true"
             style={{ 
               flex: 1, height: "100%",
               display: tab.isActive ? "flex" : "none"

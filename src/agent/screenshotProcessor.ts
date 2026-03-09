@@ -18,7 +18,9 @@ function gridLabel(index: number): string {
 
 export async function processScreenshotForAgent(base64Image: string, cursorPos?: { x: number; y: number }): Promise<string> {
     const raw = base64Image.replace(/^data:image\/\w+;base64,/, "");
+    if (!raw) throw new Error("processScreenshotForAgent: base64Image is empty");
     const buf = Buffer.from(raw, "base64");
+    if (buf.length === 0) throw new Error("processScreenshotForAgent: decoded buffer is empty");
 
     const meta = await sharp(buf).metadata();
     const W = meta.width!;
