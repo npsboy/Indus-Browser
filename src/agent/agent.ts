@@ -200,6 +200,82 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
  * [onclick], or [tabindex]. Searches within MAX_RADIUS CSS pixels.
  * Returns the snapped {x, y} or the original coords if nothing closer is found.
  */
+async function snapToNearestClickablePoint(
+    wc: Electron.WebContents,
+    targetX: number,
+    targetY: number,
+    maxRadius = 90
+): Promise<{ x: number; y: number }> {
+    const result = await wc.executeJavaScript(`
+        (() => {
+            const targetX = ${targetX};
+            const targetY = ${targetY};
+            const maxRadius = ${maxRadius};
+
+            const selector = [
+                'a[href]',
+                'button',
+                'input:not([type="hidden"])',
+                'select',
+                'textarea',
+                'summary',
+                '[role="button"]',
+                '[role="link"]',
+                '[role="menuitem"]',
+                '[role="tab"]',
+                '[role="checkbox"]',
+                '[role="radio"]',
+                '[onclick]',
+                '[tabindex]:not([tabindex="-1"])'
+            ].join(',');
+
+            const isVisible = (el) => {
+                if (!el || !(el instanceof Element)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
+                const rect = el.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) return false;
+                return rect.bottom > 0 && rect.right > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
+            };
+
+            const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+            let best = null;
+            let bestDist = Infinity;
+
+            const candidates = document.querySelectorAll(selector);
+            for (const el of candidates) {
+                if (!isVisible(el)) continue;
+                const rect = el.getBoundingClientRect();
+
+                const nearestX = clamp(targetX, rect.left, rect.right);
+                const nearestY = clamp(targetY, rect.top, rect.bottom);
+                const dist = Math.hypot(nearestX - targetX, nearestY - targetY);
+                if (dist > maxRadius || dist >= bestDist) continue;
+
+                const visibleLeft = Math.max(0, rect.left);
+                const visibleTop = Math.max(0, rect.top);
+                const visibleRight = Math.min(window.innerWidth, rect.right);
+                const visibleBottom = Math.min(window.innerHeight, rect.bottom);
+                if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) continue;
+
+                const centerX = Math.round((visibleLeft + visibleRight) / 2);
+                const centerY = Math.round((visibleTop + visibleBottom) / 2);
+
+                bestDist = dist;
+                best = { x: centerX, y: centerY };
+            }
+
+            return best || { x: Math.round(targetX), y: Math.round(targetY) };
+        })()
+    `).catch(() => null);
+
+    if (result && typeof result.x === "number" && typeof result.y === "number") {
+        return { x: result.x, y: result.y };
+    }
+    return { x: targetX, y: targetY };
+}
+
 async function executeCommand(cmd: any): Promise<void> {
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!mainWc) return;
@@ -212,8 +288,9 @@ async function executeCommand(cmd: any): Promise<void> {
             console.error("Cannot click: no active webview found");
             return;
         }
-        const relX = cmd.x;
-        const relY = cmd.y;
+        const snappedPoint = await snapToNearestClickablePoint(webviewInfo.wc, cmd.x, cmd.y);
+        const relX = snappedPoint.x;
+        const relY = snappedPoint.y;
         lastCursorPos = { x: relX, y: relY };
 
         BrowserWindow.getAllWindows()[0]?.focus();
