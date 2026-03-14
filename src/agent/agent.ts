@@ -8,6 +8,38 @@ import { tmpdir } from "os";
 const agentPrompt = readFileSync(join(__dirname, "prompts/agent-prompt.md"), "utf-8");
 const plannerPrompt = readFileSync(join(__dirname, "prompts/planner-prompt.md"), "utf-8");
 
+export type AgentTaskPlan = {
+    complexity: string;
+    tasks: string[];
+};
+
+export type AgentRunResumeState = {
+    plan?: AgentTaskPlan;
+    startTaskIndex?: number;
+};
+
+export class AgentRunError extends Error {
+    readonly instruction: string;
+    readonly plan: AgentTaskPlan;
+    readonly resumeTaskIndex: number;
+
+    constructor(message: string, options: {
+        instruction: string;
+        plan: AgentTaskPlan;
+        resumeTaskIndex: number;
+        cause?: unknown;
+    }) {
+        super(message);
+        this.name = "AgentRunError";
+        this.instruction = options.instruction;
+        this.plan = options.plan;
+        this.resumeTaskIndex = options.resumeTaskIndex;
+        if (options.cause !== undefined) {
+            (this as Error & { cause?: unknown }).cause = options.cause;
+        }
+    }
+}
+
 async function planTask(userPrompt: string): Promise<{ complexity: string; tasks?: string[] } | null> {
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
         method: "POST",
@@ -35,6 +67,33 @@ async function planTask(userPrompt: string): Promise<{ complexity: string; tasks
         console.error("Failed to parse planner reply:", e);
         return null;
     }
+}
+
+async function buildTaskPlan(instruction: string): Promise<AgentTaskPlan> {
+    const plannerResult = await planTask(instruction);
+    if (!plannerResult) {
+        throw new Error("Planner failed to generate a plan.");
+    }
+
+    console.log("Planner result:", plannerResult);
+
+    if (plannerResult.complexity === "complex") {
+        console.log("Planner determined the task is complex.");
+        const tasks = plannerResult.tasks;
+        if (!tasks || tasks.length === 0) {
+            throw new Error("Planner marked task as complex but did not return any subtasks.");
+        }
+
+        return {
+            complexity: plannerResult.complexity,
+            tasks,
+        };
+    }
+
+    return {
+        complexity: plannerResult.complexity,
+        tasks: [instruction],
+    };
 }
 
 
@@ -194,17 +253,20 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
 }
 
 /**
- * Finds the center of the nearest clickable element to (targetX, targetY) in the
- * webview's page. "Clickable" means <a>, <button>, <input>, <select>, <textarea>,
- * or any element with role="button"/"link"/"menuitem"/"tab"/"checkbox"/"radio",
- * [onclick], or [tabindex]. Searches within MAX_RADIUS CSS pixels.
- * Returns the snapped {x, y} or the original coords if nothing closer is found.
+ * Finds the most likely clickable target near (targetX, targetY) in the webview.
+ *
+ * The search prefers elements that are actually topmost under the pointer (via
+ * `elementsFromPoint`) instead of only matching a static selector list. This makes
+ * tiny controls such as popup close buttons more reliable, even when the clickable
+ * semantics live on an ancestor or are expressed through cursor/ARIA heuristics.
+ * Returns a point inside the resolved clickable target, or the original coords if
+ * no better target is found within MAX_RADIUS CSS pixels.
  */
 async function snapToNearestClickablePoint(
     wc: Electron.WebContents,
     targetX: number,
     targetY: number,
-    maxRadius = 90
+    maxRadius = 180
 ): Promise<{ x: number; y: number }> {
     const result = await wc.executeJavaScript(`
         (() => {
@@ -212,61 +274,168 @@ async function snapToNearestClickablePoint(
             const targetY = ${targetY};
             const maxRadius = ${maxRadius};
 
-            const selector = [
-                'a[href]',
-                'button',
-                'input:not([type="hidden"])',
-                'select',
-                'textarea',
-                'summary',
-                '[role="button"]',
-                '[role="link"]',
-                '[role="menuitem"]',
-                '[role="tab"]',
-                '[role="checkbox"]',
-                '[role="radio"]',
-                '[onclick]',
-                '[tabindex]:not([tabindex="-1"])'
-            ].join(',');
+            const CLICKABLE_TAGS = new Set([
+                'a', 'button', 'input', 'select', 'textarea', 'summary',
+                'label', 'option', 'details'
+            ]);
+            const INTERACTIVE_ROLES = new Set([
+                'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+                'tab', 'checkbox', 'radio', 'option', 'switch'
+            ]);
+            const CLOSE_KEYWORDS = /(^|[^a-z])(close|dismiss|cancel|remove|delete|clear|exit|x)([^a-z]|$)/i;
+
+            const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+            const roundPoint = (x, y) => ({ x: Math.round(x), y: Math.round(y) });
+            const inViewport = (x, y) => x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight;
+
+            const getParentElement = (el) => {
+                if (!el || !(el instanceof Element)) return null;
+                if (el.parentElement) return el.parentElement;
+                const root = el.getRootNode?.();
+                if (root instanceof ShadowRoot && root.host instanceof Element) return root.host;
+                return null;
+            };
 
             const isVisible = (el) => {
                 if (!el || !(el instanceof Element)) return false;
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
+                let current = el;
+                while (current) {
+                    const style = window.getComputedStyle(current);
+                    if (
+                        style.display === 'none' ||
+                        style.visibility === 'hidden' ||
+                        style.pointerEvents === 'none' ||
+                        style.opacity === '0'
+                    ) {
+                        return false;
+                    }
+                    current = getParentElement(current);
+                }
                 const rect = el.getBoundingClientRect();
                 if (rect.width <= 0 || rect.height <= 0) return false;
                 return rect.bottom > 0 && rect.right > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
             };
 
-            const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+            const isDisabled = (el) => {
+                if (!(el instanceof Element)) return false;
+                return el.matches(':disabled,[aria-disabled="true"]');
+            };
+
+            const hasCloseLikeSemantics = (el) => {
+                if (!(el instanceof Element)) return false;
+                const text = [
+                    el.getAttribute('aria-label'),
+                    el.getAttribute('title'),
+                    el.getAttribute('name'),
+                    el.getAttribute('alt'),
+                    el.getAttribute('data-testid'),
+                    el.getAttribute('data-test'),
+                    el.id,
+                    typeof el.className === 'string' ? el.className : '',
+                ].filter(Boolean).join(' ');
+                return CLOSE_KEYWORDS.test(text);
+            };
+
+            const isClickableCandidate = (el) => {
+                if (!el || !(el instanceof Element) || !isVisible(el) || isDisabled(el)) return false;
+
+                const tag = el.tagName.toLowerCase();
+                const role = (el.getAttribute('role') || '').toLowerCase();
+                const type = (el.getAttribute('type') || '').toLowerCase();
+                const tabIndex = el.getAttribute('tabindex');
+                const style = window.getComputedStyle(el);
+
+                if (tag === 'input' && type === 'hidden') return false;
+                if (CLICKABLE_TAGS.has(tag)) return true;
+                if (INTERACTIVE_ROLES.has(role)) return true;
+                if (el.hasAttribute('href') || (tag === 'a' && !!el.getAttribute('href'))) return true;
+                if (el.hasAttribute('onclick') || typeof el.onclick === 'function') return true;
+                if (tabIndex !== null && tabIndex !== '-1') return true;
+                if (el.getAttribute('contenteditable') === '' || el.getAttribute('contenteditable') === 'true') return true;
+                if (style.cursor === 'pointer') return true;
+                if (hasCloseLikeSemantics(el)) return true;
+
+                return false;
+            };
+
+            const resolveClickableTarget = (startEl) => {
+                let current = startEl;
+                let hops = 0;
+                while (current && hops < 8) {
+                    if (isClickableCandidate(current)) return { el: current, hops };
+                    current = getParentElement(current);
+                    hops += 1;
+                }
+                return null;
+            };
+
+            const pointInsideRect = (rect, preferredX, preferredY) => {
+                const minX = rect.width <= 2 ? (rect.left + rect.right) / 2 : rect.left + 1;
+                const maxX = rect.width <= 2 ? (rect.left + rect.right) / 2 : rect.right - 1;
+                const minY = rect.height <= 2 ? (rect.top + rect.bottom) / 2 : rect.top + 1;
+                const maxY = rect.height <= 2 ? (rect.top + rect.bottom) / 2 : rect.bottom - 1;
+                return roundPoint(clamp(preferredX, minX, maxX), clamp(preferredY, minY, maxY));
+            };
 
             let best = null;
-            let bestDist = Infinity;
+            let bestScore = Infinity;
 
-            const candidates = document.querySelectorAll(selector);
-            for (const el of candidates) {
-                if (!isVisible(el)) continue;
-                const rect = el.getBoundingClientRect();
+            const considerPoint = (sampleX, sampleY, scanRadius) => {
+                if (!inViewport(sampleX, sampleY)) return;
 
-                const nearestX = clamp(targetX, rect.left, rect.right);
-                const nearestY = clamp(targetY, rect.top, rect.bottom);
-                const dist = Math.hypot(nearestX - targetX, nearestY - targetY);
-                if (dist > maxRadius || dist >= bestDist) continue;
+                const stack = document.elementsFromPoint(sampleX, sampleY);
+                const seen = new Set();
 
-                const visibleLeft = Math.max(0, rect.left);
-                const visibleTop = Math.max(0, rect.top);
-                const visibleRight = Math.min(window.innerWidth, rect.right);
-                const visibleBottom = Math.min(window.innerHeight, rect.bottom);
-                if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) continue;
+                for (let stackIndex = 0; stackIndex < stack.length; stackIndex += 1) {
+                    const resolved = resolveClickableTarget(stack[stackIndex]);
+                    if (!resolved) continue;
 
-                const centerX = Math.round((visibleLeft + visibleRight) / 2);
-                const centerY = Math.round((visibleTop + visibleBottom) / 2);
+                    const { el, hops } = resolved;
+                    if (seen.has(el)) continue;
+                    seen.add(el);
 
-                bestDist = dist;
-                best = { x: centerX, y: centerY };
+                    const rect = el.getBoundingClientRect();
+                    const clickPoint = pointInsideRect(rect, sampleX, sampleY);
+                    const distToTarget = Math.hypot(clickPoint.x - targetX, clickPoint.y - targetY);
+                    if (distToTarget > maxRadius) continue;
+
+                    const area = Math.max(1, rect.width * rect.height);
+                    const score =
+                        distToTarget * 100 +
+                        scanRadius * 10 +
+                        stackIndex * 6 +
+                        hops * 3 +
+                        Math.min(12, Math.log(area + 1));
+
+                    if (score >= bestScore) continue;
+                    bestScore = score;
+                    best = clickPoint;
+
+                    if (distToTarget === 0 && stackIndex === 0 && hops === 0) {
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            if (considerPoint(Math.round(targetX), Math.round(targetY), 0)) {
+                return best;
             }
 
-            return best || { x: Math.round(targetX), y: Math.round(targetY) };
+            for (let radius = 6; radius <= maxRadius; radius += 6) {
+                const steps = Math.max(8, Math.ceil((Math.PI * 2 * radius) / 10));
+                for (let step = 0; step < steps; step += 1) {
+                    const angle = (step / steps) * Math.PI * 2;
+                    const sampleX = Math.round(targetX + Math.cos(angle) * radius);
+                    const sampleY = Math.round(targetY + Math.sin(angle) * radius);
+                    if (considerPoint(sampleX, sampleY, radius)) {
+                        return best;
+                    }
+                }
+            }
+
+            return best || roundPoint(targetX, targetY);
         })()
     `).catch(() => null);
 
@@ -346,12 +515,13 @@ async function executeCommand(cmd: any): Promise<void> {
             '\n': 'Return', '\r': 'Return', '\t': 'Tab', ' ': 'Space',
             '\b': 'Backspace',
         };
+        const shouldInsertText = (char: string) => !['\n', '\r', '\t', '\b'].includes(char);
         for (const char of cmd.text) {
             const keyCode = KEY_CODE_MAP[char] ?? char;
             webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode } as any);
-            if (!(char in KEY_CODE_MAP)) {
-                // insertText only for printable characters; special keys are handled
-                // entirely by keyDown/keyUp.
+            if (shouldInsertText(char)) {
+                // insertText for printable characters (including space) so controlled
+                // inputs and contenteditable targets receive text updates.
                 await webviewInfo.wc.insertText(char);
             }
             webviewInfo.wc.sendInputEvent({ type: 'keyUp', keyCode } as any);
@@ -572,35 +742,25 @@ async function waitForDomChange(timeout: number): Promise<void> {
     await Promise.all([minDelay, domChangePromise]);
 }
 
-export async function runAgentWithInstruction(instruction: string): Promise<void> {
-    const plannerResult = await planTask(instruction);
-    if (!plannerResult) {
-        console.error("Planner failed to generate a plan.");
-        return;
-    }
-    console.log("Planner result:", plannerResult);
-    let tasks;
-    let currentTask;
-    if (plannerResult.complexity === "complex") {
-        console.log("Planner determined the task is complex.");
-        tasks = plannerResult.tasks;
-        if (!tasks || tasks.length === 0) {
-            console.error("Planner marked task as complex but did not return any subtasks.");
-            return;
-        }
-    }
-    else {
-        tasks = [instruction];
-    }
-
+export async function runAgentWithInstruction(instruction: string, resumeState: AgentRunResumeState = {}): Promise<string> {
+    const plan = resumeState.plan ?? await buildTaskPlan(instruction);
+    const tasks = plan.tasks;
+    const requestedStartIndex = resumeState.startTaskIndex ?? 0;
+    const startTaskIndex = Math.min(Math.max(requestedStartIndex, 0), tasks.length - 1);
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     let finalAnswer = "";
+    let currentTaskIndex = startTaskIndex;
     
     try {
         agentStopped = false;
         agentPaused = false;
-        for (const task of tasks) {
-            currentTask = task;
+        if (startTaskIndex > 0) {
+            console.log(`Resuming agent from macro task ${startTaskIndex + 1}/${tasks.length}.`);
+        }
+
+        for (let taskIndex = startTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
+            currentTaskIndex = taskIndex;
+            const currentTask = tasks[taskIndex];
         
             past_actions = [];
             lastCursorPos = null;
@@ -623,7 +783,7 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
                 }
                 if (!screenshotResult) {
                     console.error("Failed to take screenshot after all retries. Aborting agent loop.");
-                    break;
+                    throw new Error("Failed to take screenshot after all retries.");
                 }
                 const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
             
@@ -634,7 +794,9 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
                 const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
                     mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
                 const response = await GetAction(currentTask, screenshot, currentUrl, openTabs);
-                if (!response) break;
+                if (!response) {
+                    throw new Error("Agent action endpoint returned no response.");
+                }
             
                 let tool = response?.tool || null;
                 console.log("Agent selected tool:", tool);
@@ -649,21 +811,21 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
                 let cmd = getCommand(tool, winW, winH, ssW, ssH);
             
                 if (!cmd) {
-                    console.error("Unknown tool name:", tool.name);
-                    break;
+                    throw new Error(`Unknown tool name: ${tool?.name}`);
                 }
             
                 if (cmd.type === "agent:final_answer") {
                     console.log("Agent final answer:", cmd.text);
                     finalAnswer = cmd.text || "";
-                    if (tasks.indexOf(task) === tasks.length - 1) {
-                        return; // If this is the last task, we can finish immediately without waiting for the next loop iteration.
+                    if (taskIndex === tasks.length - 1) {
+                        return finalAnswer; // If this is the last task, we can finish immediately without waiting for the next loop iteration.
                     }
                     break; // Otherwise, break to move on to the next task (if any).
                 }
             
                 if (cmd.type === "agent:warn") {
                     console.log("Agent warning:", cmd.message);
+                    mainWc?.send("agent:warn", cmd.message || "Agent returned a warning.");
                     break;
                 }
             
@@ -714,9 +876,21 @@ export async function runAgentWithInstruction(instruction: string): Promise<void
                 await waitForDomChange(1500);
             }
         }
+        return finalAnswer;
+    } catch (error) {
+        if (error instanceof AgentRunError) {
+            throw error;
+        }
+
+        const message = error instanceof Error ? error.message : String(error ?? "Unknown agent error");
+        throw new AgentRunError(message, {
+            instruction,
+            plan,
+            resumeTaskIndex: currentTaskIndex,
+            cause: error,
+        });
     } finally {
         agentStopped = false;
         agentPaused = false;
-        mainWc?.send("agent:done", finalAnswer);
     }
 }

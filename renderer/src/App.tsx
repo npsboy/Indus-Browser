@@ -430,6 +430,15 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const cleanup = (window as any).api?.onAgentWarn((_event: any, message: string) => {
+      if (message && message.trim()) {
+        setChatMessages(prev => [...prev, { role: 'reply', text: `⚠️ ${message.trim()}` }]);
+      }
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
@@ -614,27 +623,30 @@ function App() {
 
 
   useEffect(() => {
-    (window as any).api?.onAgentNewTab((_event: any, url?: string) => {
+    const cleanup = (window as any).api?.onAgentNewTab((_event: any, url?: string) => {
       if (url) {
         addTab(url);
       } else {
         addTab("https://www.google.com");
       }
     });
+    return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    (window as any).api?.onAgentReloadActiveTab(() => {
+    const cleanup = (window as any).api?.onAgentReloadActiveTab(() => {
       handleReloadActiveTab();
     });
+    return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    (window as any).api?.onAgentCloseActiveTab(() => {
+    const cleanup = (window as any).api?.onAgentCloseActiveTab(() => {
       if (activeTabId) {
         closeTab(activeTabId);
       }
     });
+    return () => cleanup?.();
   }, []);
 
   useEffect(() => {

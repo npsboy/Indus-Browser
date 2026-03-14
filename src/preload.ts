@@ -87,6 +87,11 @@ function onAgentDone(callback: (_event: any, answer: string) => void) {
   return () => ipcRenderer.removeListener('agent:done', callback);
 }
 
+function onAgentWarn(callback: (_event: any, message: string) => void) {
+  ipcRenderer.on('agent:warn', callback);
+  return () => ipcRenderer.removeListener('agent:warn', callback);
+}
+
 function onOpenUrlInNewTab(callback: (_event: any, url: string) => void) {
   ipcRenderer.on('browser:open-url-in-new-tab', callback);
   return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
@@ -112,5 +117,6 @@ contextBridge.exposeInMainWorld('api', {
     pauseAgent,
     resumeAgent,
     onAgentDone,
+    onAgentWarn,
     onOpenUrlInNewTab
 });

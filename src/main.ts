@@ -1,7 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { runAgentWithInstruction, setAgentStopped, setAgentPaused } from "./agent/agent";
+import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -136,9 +136,49 @@ async function runAgent(instruction?: string){
         console.log("Agent is already running, ignoring duplicate call.");
         return;
     }
+
+    const instructionToRun = instruction ?? "sign me up for github copilot";
+    const MAX_ATTEMPTS = 3;
+    const RETRY_DELAY_MS = 2500;
+    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    let resumeState: AgentRunResumeState | undefined;
+
     agentRunning = true;
     try {
-        await runAgentWithInstruction(instruction ?? "sign me up for github copilot");
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                const finalAnswer = await runAgentWithInstruction(instructionToRun, resumeState);
+                mainWc?.send('agent:done', finalAnswer || '');
+                return;
+            } catch (error) {
+                lastError = error;
+                console.error(`[Agent] runAgentWithInstruction failed (attempt ${attempt}/${MAX_ATTEMPTS})`, error);
+
+                if (error instanceof AgentRunError) {
+                    resumeState = {
+                        plan: error.plan,
+                        startTaskIndex: error.resumeTaskIndex,
+                    };
+                    console.log(`[Agent] Next retry will resume from macro task ${error.resumeTaskIndex + 1}/${error.plan.tasks.length}.`);
+                } else {
+                    resumeState = undefined;
+                }
+
+                if (attempt < MAX_ATTEMPTS) {
+                    const retryLabel = resumeState?.plan
+                        ? `macro task ${resumeState.startTaskIndex! + 1}/${resumeState.plan.tasks.length}`
+                        : 'same instruction';
+                    console.log(`[Agent] Retrying ${retryLabel} in ${RETRY_DELAY_MS}ms...`);
+                    await new Promise<void>(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+                }
+            }
+        }
+
+        const failureMessage = lastError instanceof Error ? lastError.message : String(lastError ?? 'Unknown agent error');
+        mainWc?.send('agent:warn', `Agent failed after ${MAX_ATTEMPTS} attempts: ${failureMessage}`);
+        mainWc?.send('agent:done', '');
+        throw lastError;
     } finally {
         agentRunning = false;
     }

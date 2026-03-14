@@ -11,6 +11,7 @@ declare global {
       pauseAgent: () => void;
       resumeAgent: () => void;
       onAgentDone: (callback: (_event: any, answer: string) => void) => (() => void);
+      onAgentWarn: (callback: (_event: any, message: string) => void) => (() => void);
     };
   }
 }
