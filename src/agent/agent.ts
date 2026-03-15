@@ -1,4 +1,4 @@
-import { BrowserWindow, webContents as allWebContents } from "electron";
+import { BrowserWindow, webContents as allWebContents, screen as electronScreen } from "electron";
 import { processScreenshotForAgent } from "./screenshotProcessor";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -465,12 +465,23 @@ async function executeCommand(cmd: any): Promise<void> {
         BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
 
+        // sendInputEvent on Electron guest webContents (webview) expects PHYSICAL pixels,
+        // not CSS/logical pixels, on Windows with display scaling > 100%.
+        // Multiply by the display scale factor to correct for HiDPI.
+        const winBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
+        const display = winBounds
+            ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
+            : electronScreen.getPrimaryDisplay();
+        const sf = display.scaleFactor ?? 1;
+        const physX = Math.round(relX * sf);
+        const physY = Math.round(relY * sf);
+
         // Native input events — these are trusted (isTrusted=true) and work on
         // all sites including those that reject synthetic JS events.
-        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: relX, y: relY });
-        webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: relX, y: relY, button: 'left', clickCount: 1 });
+        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: physX, y: physY });
+        webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: physX, y: physY, button: 'left', clickCount: 1 });
         await new Promise<void>(r => setTimeout(r, 80));
-        webviewInfo.wc.sendInputEvent({ type: 'mouseUp', x: relX, y: relY, button: 'left', clickCount: 1 });
+        webviewInfo.wc.sendInputEvent({ type: 'mouseUp', x: physX, y: physY, button: 'left', clickCount: 1 });
 
         // JS fallback: walk up to the nearest <a>/<button>/interactive ancestor and
         // call .click() on it. This covers React/SPA event-delegation cases where the
@@ -552,9 +563,17 @@ async function executeCommand(cmd: any): Promise<void> {
         BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
         // Move mouse to the scroll target first so the renderer picks the right element.
-        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: cmd.x, y: cmd.y, movementX: 0, movementY: 0 } as any);
+        // sendInputEvent needs physical pixels — scale by display factor.
+        const scrollWinBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
+        const scrollDisplay = scrollWinBounds
+            ? electronScreen.getDisplayNearestPoint({ x: scrollWinBounds.x, y: scrollWinBounds.y })
+            : electronScreen.getPrimaryDisplay();
+        const scrollSf = scrollDisplay.scaleFactor ?? 1;
+        const scrollPhysX = Math.round(cmd.x * scrollSf);
+        const scrollPhysY = Math.round(cmd.y * scrollSf);
+        webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: scrollPhysX, y: scrollPhysY, movementX: 0, movementY: 0 } as any);
         // cmd.x/y are already webview-relative — no offset subtraction needed.
-        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: cmd.x, y: cmd.y, deltaX: cmd.deltaX ?? 0, deltaY: cmd.deltaY ?? 0, canScroll: true } as any);
+        webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: scrollPhysX, y: scrollPhysY, deltaX: cmd.deltaX ?? 0, deltaY: cmd.deltaY ?? 0, canScroll: true } as any);
     } else if (cmd.type === "agent:keypress") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
@@ -826,7 +845,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                 if (cmd.type === "agent:warn") {
                     console.log("Agent warning:", cmd.message);
                     mainWc?.send("agent:warn", cmd.message || "Agent returned a warning.");
-                    break;
+                    return finalAnswer;
                 }
             
                 if (agentStopped) break;
