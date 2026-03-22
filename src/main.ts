@@ -1,7 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
-import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused } from "./agent/agent";
+import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -119,6 +119,8 @@ ipcMain.handle('agent:run-instruction', async (_event, instruction: string) => {
 
 ipcMain.on('agent:stop', () => {
     setAgentStopped(true);
+    setAgentPaused(false);
+    BrowserWindow.getAllWindows()[0]?.webContents.send('agent:done', '');
 });
 
 ipcMain.on('agent:pause', () => {
@@ -137,6 +139,10 @@ async function runAgent(instruction?: string){
         return;
     }
 
+    // New run starts fresh; stop/pause are per-run controls.
+    setAgentStopped(false);
+    setAgentPaused(false);
+
     const instructionToRun = instruction ?? "sign me up for github copilot";
     const MAX_ATTEMPTS = 3;
     const RETRY_DELAY_MS = 2500;
@@ -147,11 +153,21 @@ async function runAgent(instruction?: string){
     try {
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            if (isAgentStopped()) {
+                console.log("[Agent] Stop requested before attempt; ending run.");
+                mainWc?.send('agent:done', '');
+                return;
+            }
             try {
                 const finalAnswer = await runAgentWithInstruction(instructionToRun, resumeState);
                 mainWc?.send('agent:done', finalAnswer || '');
                 return;
             } catch (error) {
+                if (isAgentStopped()) {
+                    console.log("[Agent] Stop requested during run; not retrying.");
+                    mainWc?.send('agent:done', '');
+                    return;
+                }
                 lastError = error;
                 console.error(`[Agent] runAgentWithInstruction failed (attempt ${attempt}/${MAX_ATTEMPTS})`, error);
 
@@ -166,6 +182,11 @@ async function runAgent(instruction?: string){
                 }
 
                 if (attempt < MAX_ATTEMPTS) {
+                    if (isAgentStopped()) {
+                        console.log("[Agent] Stop requested before retry delay; ending run.");
+                        mainWc?.send('agent:done', '');
+                        return;
+                    }
                     const retryLabel = resumeState?.plan
                         ? `macro task ${resumeState.startTaskIndex! + 1}/${resumeState.plan.tasks.length}`
                         : 'same instruction';

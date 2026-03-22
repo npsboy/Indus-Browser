@@ -40,20 +40,59 @@ export class AgentRunError extends Error {
     }
 }
 
+class AgentStoppedError extends Error {
+    constructor(message = "Agent stopped by user") {
+        super(message);
+        this.name = "AgentStoppedError";
+    }
+}
+
+let pendingFetchAbortController: AbortController | null = null;
+
+function throwIfStopped(): void {
+    if (agentStopped) {
+        throw new AgentStoppedError();
+    }
+}
+
+async function sleepInterruptible(ms: number, stepMs = 100): Promise<void> {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+        throwIfStopped();
+        await new Promise<void>(resolve => setTimeout(resolve, Math.min(stepMs, end - Date.now())));
+    }
+    throwIfStopped();
+}
+
 async function planTask(userPrompt: string): Promise<{ complexity: string; tasks?: string[] } | null> {
-    const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            agentRole: "planner",
-            messages: [
-                { role: "system", content: plannerPrompt },
-                { role: "user", content: `This is the user's request. "${userPrompt}"` }
-            ]
-        })
-    });
+    throwIfStopped();
+    pendingFetchAbortController = new AbortController();
+    let response: Response;
+    try {
+        response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                agentRole: "planner",
+                messages: [
+                    { role: "system", content: plannerPrompt },
+                    { role: "user", content: `This is the user's request. "${userPrompt}"` }
+                ]
+            }),
+            signal: pendingFetchAbortController.signal,
+        });
+    } catch (error) {
+        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
+            throw new AgentStoppedError();
+        }
+        throw error;
+    } finally {
+        pendingFetchAbortController = null;
+    }
+
+    throwIfStopped();
     const data = await response.json();
     try {
         let replyStr: string;
@@ -98,27 +137,42 @@ async function buildTaskPlan(instruction: string): Promise<AgentTaskPlan> {
 
 
 async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string, openTabs?: { id: string; url: string; title?: string; isActive: boolean }[]){
+    throwIfStopped();
     const tabsContext = openTabs && openTabs.length > 0
         ? `\nOpen tabs:\n${openTabs.map((t, i) => `  ${t.isActive ? '[active] ' : ''}Tab ${i + 1}: ${t.title || 'Untitled'} — ${t.url}`).join('\n')}`
         : "";
-    const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ 
-            messages: [
-                {
-                    role: "system",
-                    content: agentPrompt + (past_actions.length > 0
-                        ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
-                        : "")
-                },
-                { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${tabsContext}` }
-            ],
-            imageUrl: imageurl
-         })
-    });
+    pendingFetchAbortController = new AbortController();
+    let response: Response;
+    try {
+        response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ 
+                messages: [
+                    {
+                        role: "system",
+                        content: agentPrompt + (past_actions.length > 0
+                            ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
+                            : "")
+                    },
+                    { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${tabsContext}` }
+                ],
+                imageUrl: imageurl
+            }),
+            signal: pendingFetchAbortController.signal,
+        });
+    } catch (error) {
+        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
+            throw new AgentStoppedError();
+        }
+        throw error;
+    } finally {
+        pendingFetchAbortController = null;
+    }
+
+    throwIfStopped();
     if (!response.ok) {
         const errText = await response.text();
         console.error(`Agent endpoint error ${response.status}:`, errText);
@@ -133,11 +187,46 @@ async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string
  * Number 1-10 maps to offset 0-9 within the group. */
 function parseLabelIndex(label: string): number {
     const letters = "abcdefghijklmnopqrstuvwxyz";
-    const match = label.match(/^([a-z])(\d+)$/);
+    const match = label.toLowerCase().match(/^([a-z])(\d+)$/);
     if (!match) throw new Error(`Invalid grid label: "${label}"`);
     const letterIdx = letters.indexOf(match[1]);  // 0-based letter group
     const num       = parseInt(match[2], 10);     // 1-based number within group
     return letterIdx * 10 + (num - 1);            // 0-based raw grid index
+}
+
+function toNumberIfFinite(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+}
+
+function resolveScreenshotPointFromToolArgs(
+    xArg: unknown,
+    yArg: unknown,
+    screenshotW: number,
+    screenshotH: number
+): { x: number; y: number } {
+    const numericX = toNumberIfFinite(xArg);
+    const numericY = toNumberIfFinite(yArg);
+
+    // If the model returns numeric coordinates, treat them as screenshot-space pixels.
+    if (numericX !== null && numericY !== null) {
+        return {
+            x: Math.max(0, Math.min(Math.round(numericX), screenshotW - 1)),
+            y: Math.max(0, Math.min(Math.round(numericY), screenshotH - 1)),
+        };
+    }
+
+    if (typeof xArg === "string" && typeof yArg === "string") {
+        return translateCoordinates(xArg, yArg, screenshotW, screenshotH);
+    }
+
+    throw new Error(
+        `Invalid coordinates from model. Expected grid labels or numeric x/y, got x=${JSON.stringify(xArg)}, y=${JSON.stringify(yArg)}`
+    );
 }
 
 /**
@@ -169,18 +258,34 @@ async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: numb
 
     // Ask the renderer for the active webview's bounding rect AND its WebContents ID
     // so we can precisely identify the right WebContents when multiple tabs are open.
-    const info: { x: number; y: number; w: number; h: number; wcId: number } | null =
+    const info: { x: number; y: number; w: number; h: number; wcId: number | null } | null =
         await win.webContents.executeJavaScript(`
             (() => {
                 const wv = document.querySelector('webview[style*="display: flex"]');
                 if (!wv) return null;
                 const r = wv.getBoundingClientRect();
-                return { x: r.left, y: r.top, w: r.width, h: r.height, wcId: wv.getWebContentsId() };
+                let wcId = null;
+                try {
+                    wcId = wv.getWebContentsId();
+                } catch {
+                    // Can happen briefly while a new tab/webview is being attached.
+                    wcId = null;
+                }
+                return { x: r.left, y: r.top, w: r.width, h: r.height, wcId };
             })()
-        `);
+        `).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`[Agent] getActiveWebviewWc executeJavaScript failed: ${message}`);
+            return null;
+        });
 
     if (!info) {
-        console.error("Could not find active webview bounds");
+        console.warn("Could not find active webview bounds");
+        return null;
+    }
+
+    if (!info.wcId) {
+        console.warn("Active webview exists but guest WebContents is not ready yet");
         return null;
     }
 
@@ -446,6 +551,7 @@ async function snapToNearestClickablePoint(
 }
 
 async function executeCommand(cmd: any): Promise<void> {
+    throwIfStopped();
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     if (!mainWc) return;
 
@@ -480,7 +586,7 @@ async function executeCommand(cmd: any): Promise<void> {
         // all sites including those that reject synthetic JS events.
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: physX, y: physY });
         webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: physX, y: physY, button: 'left', clickCount: 1 });
-        await new Promise<void>(r => setTimeout(r, 80));
+        await sleepInterruptible(80, 20);
         webviewInfo.wc.sendInputEvent({ type: 'mouseUp', x: physX, y: physY, button: 'left', clickCount: 1 });
 
         // JS fallback: walk up to the nearest <a>/<button>/interactive ancestor and
@@ -528,6 +634,7 @@ async function executeCommand(cmd: any): Promise<void> {
         };
         const shouldInsertText = (char: string) => !['\n', '\r', '\t', '\b'].includes(char);
         for (const char of cmd.text) {
+            throwIfStopped();
             const keyCode = KEY_CODE_MAP[char] ?? char;
             webviewInfo.wc.sendInputEvent({ type: 'keyDown', keyCode } as any);
             if (shouldInsertText(char)) {
@@ -537,7 +644,7 @@ async function executeCommand(cmd: any): Promise<void> {
             }
             webviewInfo.wc.sendInputEvent({ type: 'keyUp', keyCode } as any);
             // Small inter-character delay so rapid keydown events aren't dropped.
-            await new Promise<void>(r => setTimeout(r, 30));
+            await sleepInterruptible(30, 10);
         }
     } else if (cmd.type === "agent:navigate") {
         if (cmd.new_tab !== false) {
@@ -627,7 +734,7 @@ async function executeCommand(cmd: any): Promise<void> {
         console.log(`[Agent] Key pressed: ${cmd.key}${modifiers.length ? ` (modifiers: ${modifiers.join('+')})` : ''}`);
     } else if (cmd.type === "agent:wait") {
         console.log(`[Agent] Waiting ${cmd.seconds}s...`);
-        await new Promise<void>(resolve => setTimeout(resolve, cmd.seconds * 1000));
+        await sleepInterruptible(cmd.seconds * 1000, 100);
     }
 }
 
@@ -643,9 +750,8 @@ if (!tool) return;
 
     let cmd: any;
     if (tool.name === "click") {
-        // translateCoordinates maps grid labels → resized-screenshot space.
-        // Scale to webview CSS pixels (winW/winH = webview dimensions).
-        const ssCoords = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
+        // Accept either grid labels (e.g. "c12") or numeric screenshot coordinates.
+        const ssCoords = resolveScreenshotPointFromToolArgs(tool_arguments.x, tool_arguments.y, ssW, ssH);
         const clickX = Math.round(ssCoords.x * (winW / ssW));
         const clickY = Math.round(ssCoords.y * (winH / ssH));
         cmd = { type: "agent:click", x: clickX, y: clickY };
@@ -656,8 +762,8 @@ if (!tool) return;
     } else if (tool.name === "navigate") {
         cmd = { type: "agent:navigate", url: tool_arguments.url, new_tab: tool_arguments.new_tab !== false };
     } else if (tool.name === "scroll") {
-        // x/y are grid label coords (same as click) — translate to webview CSS pixels.
-        const ssPos = translateCoordinates(tool_arguments.x, tool_arguments.y, ssW, ssH);
+        // Accept either grid labels or numeric screenshot coordinates.
+        const ssPos = resolveScreenshotPointFromToolArgs(tool_arguments.x, tool_arguments.y, ssW, ssH);
         const scrollAtX = Math.round(ssPos.x * (winW / ssW));
         const scrollAtY = Math.round(ssPos.y * (winH / ssH));
         // delta_x/delta_y are column/row counts (can be negative).
@@ -687,7 +793,14 @@ let lastCursorPos: { x: number; y: number } | null = null;
 let agentStopped = false;
 let agentPaused = false;
 
-export function setAgentStopped(v: boolean) { agentStopped = v; }
+export function setAgentStopped(v: boolean) {
+    agentStopped = v;
+    if (v && pendingFetchAbortController) {
+        pendingFetchAbortController.abort();
+        pendingFetchAbortController = null;
+    }
+}
+export function isAgentStopped(): boolean { return agentStopped; }
 export function setAgentPaused(v: boolean) { agentPaused = v; }
 
 /** Pauses the loop until unpaused or stopped. Returns true if the agent was stopped. */
@@ -706,13 +819,14 @@ async function waitIfPaused(): Promise<boolean> {
  * Always waits at least MIN_DELAY_MS regardless of how fast the DOM settles.
  */
 async function waitForDomChange(timeout: number): Promise<void> {
+    throwIfStopped();
     const MIN_DELAY_MS = 1200;
     const DEBOUNCE_MS  = 400;   // wait this long after the last mutation before resolving
     const MAX_FROM_FIRST_MS = 3000; // hard cap from first detected mutation
 
-    const minDelay = new Promise<void>(resolve => setTimeout(resolve, MIN_DELAY_MS));
+    const minDelay = sleepInterruptible(MIN_DELAY_MS, 100);
     // Node-side timeout — guards against a stuck executeJavaScript call
-    const nodeTimeout = new Promise<void>(resolve => setTimeout(resolve, timeout));
+    const nodeTimeout = sleepInterruptible(timeout, 100);
     const webviewInfo = await getActiveWebviewWc();
     if (!webviewInfo) {
         await Promise.all([minDelay, nodeTimeout]);
@@ -762,6 +876,7 @@ async function waitForDomChange(timeout: number): Promise<void> {
 }
 
 export async function runAgentWithInstruction(instruction: string, resumeState: AgentRunResumeState = {}): Promise<string> {
+    throwIfStopped();
     const plan = resumeState.plan ?? await buildTaskPlan(instruction);
     const tasks = plan.tasks;
     const requestedStartIndex = resumeState.startTaskIndex ?? 0;
@@ -792,12 +907,13 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                 if (await waitIfPaused()) break;
             
                 console.log("Running agent with instruction:", currentTask);
+                throwIfStopped();
             
                 let screenshotResult = await takeScreenshot();
                 if (!screenshotResult) {
                     // Give the webview one more chance — wait an extra second and retry once.
                     console.warn("Failed to take screenshot, waiting 2s before one final retry...");
-                    await new Promise<void>(resolve => setTimeout(resolve, 2000));
+                    await sleepInterruptible(2000, 100);
                     screenshotResult = await takeScreenshot();
                 }
                 if (!screenshotResult) {
@@ -813,6 +929,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                 const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
                     mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
                 const response = await GetAction(currentTask, screenshot, currentUrl, openTabs);
+                throwIfStopped();
                 if (!response) {
                     throw new Error("Agent action endpoint returned no response.");
                 }
@@ -853,6 +970,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
             
                 console.log("Executing command:", cmd);
                 await executeCommand(cmd);
+                throwIfStopped();
             
                 // After a click, capture what element is now focused so the LLM
                 // can confirm the click landed on a search/input box and won't re-click it.
@@ -891,12 +1009,16 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                 });
                 mainWc?.send("agent:action", explanation);
             
-                // Wait for any DOM change in the webview, timeout after 1s
+                // Wait for any DOM change in the webview.
                 await waitForDomChange(1500);
             }
         }
         return finalAnswer;
     } catch (error) {
+        if (error instanceof AgentStoppedError) {
+            console.log("[Agent] Stopped by user.");
+            return finalAnswer;
+        }
         if (error instanceof AgentRunError) {
             throw error;
         }
