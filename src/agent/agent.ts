@@ -7,6 +7,7 @@ import { tmpdir } from "os";
 
 const agentPrompt = readFileSync(join(__dirname, "prompts/agent-prompt.md"), "utf-8");
 const plannerPrompt = readFileSync(join(__dirname, "prompts/planner-prompt.md"), "utf-8");
+const supervisorPrompt = readFileSync(join(__dirname, "prompts/supervisor-prompt.md"), "utf-8");
 
 export type AgentTaskPlan = {
     complexity: string;
@@ -104,6 +105,50 @@ async function planTask(userPrompt: string): Promise<{ complexity: string; tasks
         return JSON.parse(replyStr) as { complexity: string; tasks?: string[] };
     } catch (e) {
         console.error("Failed to parse planner reply:", e);
+        return null;
+    }
+}
+
+async function runSupervisor(mainTask: string, plan: AgentTaskPlan, currentTaskIndex: number, screenshot: string) {
+    throwIfStopped();
+    pendingFetchAbortController = new AbortController();
+    let response: Response;
+    try {
+        response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                agentRole: "supervisor",
+                messages: [
+                    { role: "system", content: supervisorPrompt + `\n\nMain task: "${mainTask}", plan: ${JSON.stringify(plan)}, current task index: ${currentTaskIndex}` },
+                ],
+                imageUrl: screenshot
+            }),
+            signal: pendingFetchAbortController.signal,
+        });
+    } catch (error) {
+        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
+            throw new AgentStoppedError();
+        }
+        throw error;
+    } finally {
+        pendingFetchAbortController = null;
+    }
+
+    throwIfStopped();
+    const data = await response.json();
+    try {
+        let replyStr: string;
+        if (typeof data.reply === "string") {
+            replyStr = data.reply;
+        } else {
+            replyStr = JSON.stringify(data.reply);
+        }
+        return JSON.parse(replyStr) as { abnormal_repetition: boolean; refined_prompt?: string };
+    } catch (e) {
+        console.error("Failed to parse supervisor reply:", e);
         return null;
     }
 }
@@ -357,17 +402,19 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     return { base64: processedBase64, w, h, winW, winH };
 }
 
-/**
- * Finds the most likely clickable target near (targetX, targetY) in the webview.
- *
- * The search prefers elements that are actually topmost under the pointer (via
- * `elementsFromPoint`) instead of only matching a static selector list. This makes
- * tiny controls such as popup close buttons more reliable, even when the clickable
- * semantics live on an ancestor or are expressed through cursor/ARIA heuristics.
- * Returns a point inside the resolved clickable target, or the original coords if
- * no better target is found within MAX_RADIUS CSS pixels.
- */
+
 async function snapToNearestClickablePoint(
+    /**
+    * Finds the most likely clickable target near (targetX, targetY) in the webview.
+    *
+    * The search prefers elements that are actually topmost under the pointer (via
+    * `elementsFromPoint`) instead of only matching a static selector list. This makes
+    * tiny controls such as popup close buttons more reliable, even when the clickable
+    * semantics live on an ancestor or are expressed through cursor/ARIA heuristics.
+    * Returns a point inside the resolved clickable target, or the original coords if
+    * no better target is found within MAX_RADIUS CSS pixels.
+    */
+
     wc: Electron.WebContents,
     targetX: number,
     targetY: number,
@@ -1008,6 +1055,30 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                     ...(actionResult !== undefined ? { result: actionResult } : {})
                 });
                 mainWc?.send("agent:action", explanation);
+
+                let repeatedActions = [];
+                for (const [i, pastAction] of past_actions.entries()) {
+                    let tool = pastAction.tool;
+                    let params = JSON.stringify(pastAction.parameters);
+                    const existingAction = repeatedActions.find(ra => ra.tool === tool && ra.params === params);
+                    if (existingAction) {
+                        existingAction.count += 1;
+                    } else {
+                        repeatedActions.push({ tool, params, count: 1 });
+                    }
+                }
+                repeatedActions = repeatedActions.sort((a, b) => b.count - a.count);
+                const mostRepeated = repeatedActions[0];
+                if (mostRepeated && mostRepeated.count > 3) {
+                    console.log("______________________________")
+                    console.log(`Agent has executed the same action ${mostRepeated.count} times:`, mostRepeated);
+                    const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
+                    if (supervisorResponse.abnormal_repetition) {
+                        if (supervisorResponse.refined_prompt) {
+                            tasks[taskIndex] = supervisorResponse.refined_prompt;
+                        }
+                    }
+                }
             
                 // Wait for any DOM change in the webview.
                 await waitForDomChange(1500);
