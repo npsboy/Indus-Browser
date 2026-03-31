@@ -48,11 +48,21 @@ class AgentStoppedError extends Error {
     }
 }
 
+class AgentPausedError extends Error {
+    constructor(message = "Agent paused by user") {
+        super(message);
+        this.name = "AgentPausedError";
+    }
+}
+
 let pendingFetchAbortController: AbortController | null = null;
 
 function throwIfStopped(): void {
     if (agentStopped) {
         throw new AgentStoppedError();
+    }
+    if (agentPaused) {
+        throw new AgentPausedError();
     }
 }
 
@@ -85,8 +95,9 @@ async function planTask(userPrompt: string): Promise<{ complexity: string; tasks
             signal: pendingFetchAbortController.signal,
         });
     } catch (error) {
-        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
-            throw new AgentStoppedError();
+        if (error instanceof Error && error.name === "AbortError") {
+            if (agentStopped) throw new AgentStoppedError();
+            if (agentPaused) throw new AgentPausedError();
         }
         throw error;
     } finally {
@@ -111,6 +122,8 @@ async function planTask(userPrompt: string): Promise<{ complexity: string; tasks
 
 async function runSupervisor(mainTask: string, plan: AgentTaskPlan, currentTaskIndex: number, screenshot: string) {
     throwIfStopped();
+    const currentTask = plan.tasks[currentTaskIndex] ?? "";
+    const recentActions = past_actions.slice(-15);
     pendingFetchAbortController = new AbortController();
     let response: Response;
     try {
@@ -122,15 +135,27 @@ async function runSupervisor(mainTask: string, plan: AgentTaskPlan, currentTaskI
             body: JSON.stringify({
                 agentRole: "supervisor",
                 messages: [
-                    { role: "system", content: supervisorPrompt + `\n\nMain task: "${mainTask}", plan: ${JSON.stringify(plan)}, current task index: ${currentTaskIndex}` },
+                    { role: "system", content: supervisorPrompt },
+                    {
+                        role: "user",
+                        content: [
+                            `Main task: ${JSON.stringify(mainTask)}`,
+                            `Current macro task index: ${currentTaskIndex}`,
+                            `Current macro task: ${JSON.stringify(currentTask)}`,
+                            `Full plan: ${JSON.stringify(plan.tasks)}`,
+                            `Recent actions: ${JSON.stringify(recentActions)}`,
+                            "Determine if the actions indicate abnormal repetition. If yes, return a refined prompt for only the current macro task."
+                        ].join("\n")
+                    }
                 ],
                 imageUrl: screenshot
             }),
             signal: pendingFetchAbortController.signal,
         });
     } catch (error) {
-        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
-            throw new AgentStoppedError();
+        if (error instanceof Error && error.name === "AbortError") {
+            if (agentStopped) throw new AgentStoppedError();
+            if (agentPaused) throw new AgentPausedError();
         }
         throw error;
     } finally {
@@ -138,6 +163,12 @@ async function runSupervisor(mainTask: string, plan: AgentTaskPlan, currentTaskI
     }
 
     throwIfStopped();
+    if (!response.ok) {
+        const errText = await response.text();
+        console.error(`Supervisor endpoint error ${response.status}:`, errText);
+        return null;
+    }
+
     const data = await response.json();
     try {
         let replyStr: string;
@@ -209,8 +240,9 @@ async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string
             signal: pendingFetchAbortController.signal,
         });
     } catch (error) {
-        if (error instanceof Error && error.name === "AbortError" && agentStopped) {
-            throw new AgentStoppedError();
+        if (error instanceof Error && error.name === "AbortError") {
+            if (agentStopped) throw new AgentStoppedError();
+            if (agentPaused) throw new AgentPausedError();
         }
         throw error;
     } finally {
@@ -848,7 +880,14 @@ export function setAgentStopped(v: boolean) {
     }
 }
 export function isAgentStopped(): boolean { return agentStopped; }
-export function setAgentPaused(v: boolean) { agentPaused = v; }
+export function setAgentPaused(v: boolean) {
+    agentPaused = v;
+    // Abort in-flight network calls so pause takes effect immediately.
+    if (v && pendingFetchAbortController) {
+        pendingFetchAbortController.abort();
+        pendingFetchAbortController = null;
+    }
+}
 
 /** Pauses the loop until unpaused or stopped. Returns true if the agent was stopped. */
 async function waitIfPaused(): Promise<boolean> {
@@ -922,19 +961,54 @@ async function waitForDomChange(timeout: number): Promise<void> {
     await Promise.all([minDelay, domChangePromise]);
 }
 
+function findRepetetion (currentTask, past_actions) {
+    function getWords(text) {
+        return text.toLowerCase().match(/\b\w+\b/g) || [];
+    }
+    const currentWords = new Set(getWords(currentTask.explanation));
+    let repeatCount = 0;
+    for (const action of past_actions) {
+        const actionWords = new Set(getWords(action.explanation));
+        const commonWords = new Set([...currentWords].filter(word => actionWords.has(word)));
+        if (commonWords.size >= Math.min(4, currentWords.size / 2)) {
+            repeatCount++;
+        }
+    }
+    return repeatCount;
+}
+
 export async function runAgentWithInstruction(instruction: string, resumeState: AgentRunResumeState = {}): Promise<string> {
     throwIfStopped();
-    const plan = resumeState.plan ?? await buildTaskPlan(instruction);
-    const tasks = plan.tasks;
-    const requestedStartIndex = resumeState.startTaskIndex ?? 0;
-    const startTaskIndex = Math.min(Math.max(requestedStartIndex, 0), tasks.length - 1);
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     let finalAnswer = "";
-    let currentTaskIndex = startTaskIndex;
+    let currentTaskIndex = 0;
+    let plan: AgentTaskPlan;
+    let startTaskIndex = 0;
     
     try {
         agentStopped = false;
         agentPaused = false;
+        // Pause may be toggled while planning. Wait until resumed before continuing.
+        while (true) {
+            try {
+                plan = resumeState.plan ?? await buildTaskPlan(instruction);
+                break;
+            } catch (error) {
+                if (error instanceof AgentPausedError) {
+                    if (await waitIfPaused()) {
+                        return finalAnswer;
+                    }
+                    continue;
+                }
+                throw error;
+            }
+        }
+
+        const tasks = plan.tasks;
+        const requestedStartIndex = resumeState.startTaskIndex ?? 0;
+        startTaskIndex = Math.min(Math.max(requestedStartIndex, 0), tasks.length - 1);
+        currentTaskIndex = startTaskIndex;
+
         if (startTaskIndex > 0) {
             console.log(`Resuming agent from macro task ${startTaskIndex + 1}/${tasks.length}.`);
         }
@@ -947,147 +1021,149 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
             lastCursorPos = null;
             
             while (true) {
-                // Check stop flag
-                if (agentStopped) break;
-            
-                // Wait if paused (returns true if stopped while paused)
-                if (await waitIfPaused()) break;
-            
-                console.log("Running agent with instruction:", currentTask);
-                throwIfStopped();
-            
-                let screenshotResult = await takeScreenshot();
-                if (!screenshotResult) {
-                    // Give the webview one more chance — wait an extra second and retry once.
-                    console.warn("Failed to take screenshot, waiting 2s before one final retry...");
-                    await sleepInterruptible(2000, 100);
-                    screenshotResult = await takeScreenshot();
-                }
-                if (!screenshotResult) {
-                    console.error("Failed to take screenshot after all retries. Aborting agent loop.");
-                    throw new Error("Failed to take screenshot after all retries.");
-                }
-                const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
-            
-                if (agentStopped) break;
-                if (await waitIfPaused()) break;
-            
-                const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
-                const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
-                    mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
-                const response = await GetAction(currentTask, screenshot, currentUrl, openTabs);
-                throwIfStopped();
-                if (!response) {
-                    throw new Error("Agent action endpoint returned no response.");
-                }
-            
-                let tool = response?.tool || null;
-                console.log("Agent selected tool:", tool);
-            
-                let tool_arguments: any = {};
-                if (tool?.arguments) {
-                    tool_arguments = typeof tool.arguments === "string"
-                        ? JSON.parse(tool.arguments)
-                        : tool.arguments;
-                }
-            
-                let cmd = getCommand(tool, winW, winH, ssW, ssH);
-            
-                if (!cmd) {
-                    throw new Error(`Unknown tool name: ${tool?.name}`);
-                }
-            
-                if (cmd.type === "agent:final_answer") {
-                    console.log("Agent final answer:", cmd.text);
-                    finalAnswer = cmd.text || "";
-                    if (taskIndex === tasks.length - 1) {
-                        return finalAnswer; // If this is the last task, we can finish immediately without waiting for the next loop iteration.
-                    }
-                    break; // Otherwise, break to move on to the next task (if any).
-                }
-            
-                if (cmd.type === "agent:warn") {
-                    console.log("Agent warning:", cmd.message);
-                    mainWc?.send("agent:warn", cmd.message || "Agent returned a warning.");
-                    return finalAnswer;
-                }
-            
-                if (agentStopped) break;
-                if (await waitIfPaused()) break;
-            
-                console.log("Executing command:", cmd);
-                await executeCommand(cmd);
-                throwIfStopped();
-            
-                // After a click, capture what element is now focused so the LLM
-                // can confirm the click landed on a search/input box and won't re-click it.
-                let actionResult: string | undefined;
-                if (cmd.type === "agent:click") {
-                    const webviewInfo = await getActiveWebviewWc();
-                    if (webviewInfo) {
-                        actionResult = await webviewInfo.wc.executeJavaScript(`
-                            (() => {
-                                const el = document.activeElement;
-                                if (!el || el === document.body || el === document.documentElement) return "focused: nothing";
-                                const tag = el.tagName.toLowerCase();
-                                const type = el.getAttribute('type') || '';
-                                const placeholder = el.getAttribute('placeholder') || '';
-                                const role = el.getAttribute('role') || '';
-                                const id = el.id ? '#' + el.id : '';
-                                const name = el.getAttribute('name') || '';
-                                const parts = [tag];
-                                if (type) parts.push('[type=' + type + ']');
-                                if (id) parts.push(id);
-                                if (name) parts.push('[name=' + name + ']');
-                                if (role) parts.push('[role=' + role + ']');
-                                if (placeholder) parts.push('placeholder="' + placeholder + '"');
-                                return 'focused: ' + parts.join('');
-                            })()
-                        `).catch(() => undefined);
-                    }
-                }
-            
-                const explanation = tool_arguments.explanation || "No explanation provided.";
-                past_actions.push({
-                    tool: tool.name,
-                    parameters: tool_arguments,
-                    explanation,
-                    ...(actionResult !== undefined ? { result: actionResult } : {})
-                });
-                mainWc?.send("agent:action", explanation);
+                try {
+                    // Check stop flag
+                    if (agentStopped) break;
 
-                let repeatedActions = [];
-                for (const [i, pastAction] of past_actions.entries()) {
-                    let tool = pastAction.tool;
-                    let params = JSON.stringify(pastAction.parameters);
-                    const existingAction = repeatedActions.find(ra => ra.tool === tool && ra.params === params);
-                    if (existingAction) {
-                        existingAction.count += 1;
-                    } else {
-                        repeatedActions.push({ tool, params, count: 1 });
+                    // Wait if paused (returns true if stopped while paused)
+                    if (await waitIfPaused()) break;
+
+                    console.log("Running agent with instruction:", currentTask);
+                    throwIfStopped();
+
+                    let screenshotResult = await takeScreenshot();
+                    if (!screenshotResult) {
+                        // Give the webview one more chance — wait an extra second and retry once.
+                        console.warn("Failed to take screenshot, waiting 2s before one final retry...");
+                        await sleepInterruptible(2000, 100);
+                        screenshotResult = await takeScreenshot();
                     }
-                }
-                repeatedActions = repeatedActions.sort((a, b) => b.count - a.count);
-                const mostRepeated = repeatedActions[0];
-                if (mostRepeated && mostRepeated.count > 3) {
-                    console.log("______________________________")
-                    console.log(`Agent has executed the same action ${mostRepeated.count} times:`, mostRepeated);
-                    const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
-                    if (supervisorResponse.abnormal_repetition) {
-                        if (supervisorResponse.refined_prompt) {
-                            tasks[taskIndex] = supervisorResponse.refined_prompt;
+                    if (!screenshotResult) {
+                        console.error("Failed to take screenshot after all retries. Aborting agent loop.");
+                        throw new Error("Failed to take screenshot after all retries.");
+                    }
+                    const { base64: screenshot, w: ssW, h: ssH, winW, winH } = screenshotResult;
+
+                    throwIfStopped();
+
+                    const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
+                    const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
+                        mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
+                    const response = await GetAction(currentTask, screenshot, currentUrl, openTabs);
+                    throwIfStopped();
+                    if (!response) {
+                        throw new Error("Agent action endpoint returned no response.");
+                    }
+
+                    let tool = response?.tool || null;
+                    console.log("Agent selected tool:", tool);
+
+                    let tool_arguments: any = {};
+                    if (tool?.arguments) {
+                        tool_arguments = typeof tool.arguments === "string"
+                            ? JSON.parse(tool.arguments)
+                            : tool.arguments;
+                    }
+
+                    let cmd = getCommand(tool, winW, winH, ssW, ssH);
+
+                    if (!cmd) {
+                        throw new Error(`Unknown tool name: ${tool?.name}`);
+                    }
+
+                    if (cmd.type === "agent:final_answer") {
+                        console.log("Agent final answer:", cmd.text);
+                        finalAnswer = cmd.text || "";
+                        if (taskIndex === tasks.length - 1) {
+                            return finalAnswer; // If this is the last task, we can finish immediately without waiting for the next loop iteration.
+                        }
+                        break; // Otherwise, break to move on to the next task (if any).
+                    }
+
+                    if (cmd.type === "agent:warn") {
+                        console.log("Agent warning:", cmd.message);
+                        mainWc?.send("agent:warn", cmd.message || "Agent returned a warning.");
+                        return finalAnswer;
+                    }
+
+                    throwIfStopped();
+
+                    console.log("Executing command:", cmd);
+                    await executeCommand(cmd);
+                    throwIfStopped();
+
+                    // After a click, capture what element is now focused so the LLM
+                    // can confirm the click landed on a search/input box and won't re-click it.
+                    let actionResult: string | undefined;
+                    if (cmd.type === "agent:click") {
+                        const webviewInfo = await getActiveWebviewWc();
+                        if (webviewInfo) {
+                            actionResult = await webviewInfo.wc.executeJavaScript(`
+                                (() => {
+                                    const el = document.activeElement;
+                                    if (!el || el === document.body || el === document.documentElement) return "focused: nothing";
+                                    const tag = el.tagName.toLowerCase();
+                                    const type = el.getAttribute('type') || '';
+                                    const placeholder = el.getAttribute('placeholder') || '';
+                                    const role = el.getAttribute('role') || '';
+                                    const id = el.id ? '#' + el.id : '';
+                                    const name = el.getAttribute('name') || '';
+                                    const parts = [tag];
+                                    if (type) parts.push('[type=' + type + ']');
+                                    if (id) parts.push(id);
+                                    if (name) parts.push('[name=' + name + ']');
+                                    if (role) parts.push('[role=' + role + ']');
+                                    if (placeholder) parts.push('placeholder="' + placeholder + '"');
+                                    return 'focused: ' + parts.join('');
+                                })()
+                            `).catch(() => undefined);
                         }
                     }
+
+                    const explanation = tool_arguments.explanation || "No explanation provided.";
+                    past_actions.push({
+                        tool: tool.name,
+                        parameters: tool_arguments,
+                        explanation,
+                        ...(actionResult !== undefined ? { result: actionResult } : {})
+                    });
+                    mainWc?.send("agent:action", explanation);
+
+                    let repetitionCount = findRepetetion(tool_arguments, past_actions);
+                    if (repetitionCount > 2) {
+                        throwIfStopped();
+                        console.log("______________________________")
+                        console.log(`Agent has executed the same action ${repetitionCount} times:`, tool_arguments);
+                        const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
+                        if (supervisorResponse?.abnormal_repetition) {
+                            console.log("Supervisor detected abnormal repetition.");
+                            if (supervisorResponse.refined_prompt) {
+                                console.log("Supervisor provided a refined prompt: ", supervisorResponse.refined_prompt);
+                                tasks[taskIndex] = supervisorResponse.refined_prompt;
+                            }
+                        }
+                    }
+
+                    // Wait for any DOM change in the webview.
+                    await waitForDomChange(1500);
+                } catch (error) {
+                    if (error instanceof AgentPausedError) {
+                        if (await waitIfPaused()) break;
+                        continue;
+                    }
+                    throw error;
                 }
-            
-                // Wait for any DOM change in the webview.
-                await waitForDomChange(1500);
             }
         }
         return finalAnswer;
     } catch (error) {
         if (error instanceof AgentStoppedError) {
             console.log("[Agent] Stopped by user.");
+            return finalAnswer;
+        }
+        if (error instanceof AgentPausedError) {
+            // If pause escaped this frame, block until resumed/stopped and then return current state.
+            await waitIfPaused();
             return finalAnswer;
         }
         if (error instanceof AgentRunError) {
@@ -1097,7 +1173,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
         const message = error instanceof Error ? error.message : String(error ?? "Unknown agent error");
         throw new AgentRunError(message, {
             instruction,
-            plan,
+            plan: plan ?? resumeState.plan ?? { complexity: "unknown", tasks: [instruction] },
             resumeTaskIndex: currentTaskIndex,
             cause: error,
         });
