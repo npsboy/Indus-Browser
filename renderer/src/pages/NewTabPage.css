@@ -1,0 +1,138 @@
+.new-tab-page {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 90px 24px 60px;
+  color: var(--text-primary);
+  background: #1a1a1a;
+}
+
+.new-tab-brand {
+  position: absolute;
+  top: 28px;
+  left: 28px;
+  opacity: 0.95;
+}
+
+.new-tab-brand img {
+  width: 70px;
+  height: 70px;
+  object-fit: contain;
+}
+
+.new-tab-content {
+  width: min(860px, 92vw);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 36px;
+  text-align: center;
+}
+
+.new-tab-heading {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  color: #e5dfd6;
+}
+
+.new-tab-heading-logo {
+  width: 48px;
+  height: 48px;
+}
+
+.new-tab-heading h1 {
+  margin: 0;
+  font-family: "Marcellus", serif;
+  font-size: 38px;
+  font-weight: 400;
+  letter-spacing: -0.2px;
+}
+
+.new-tab-search {
+  width: min(720px, 90vw);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 24px;
+  border-radius: 12px;
+  background: #232323;
+  border: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.new-tab-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #e5dfd6;
+  font-size: 16px;
+  font-family: inherit;
+}
+
+.new-tab-input::placeholder {
+  color: #8c867c;
+}
+
+.new-tab-submit {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.new-tab-submit svg {
+  width: 18px;
+  height: 18px;
+}
+
+.new-tab-submit:hover {
+  transform: translateY(-1px);
+  opacity: 0.9;
+}
+
+.new-tab-submit:active {
+  transform: translateY(0);
+}
+
+@media (max-width: 720px) {
+  .new-tab-page {
+    padding: 80px 18px 40px;
+  }
+
+  .new-tab-brand {
+    top: 20px;
+    left: 20px;
+  }
+
+  .new-tab-brand img {
+    width: 52px;
+    height: 52px;
+  }
+
+  .new-tab-heading h1 {
+    font-size: 24px;
+  }
+
+  .new-tab-search {
+    border-radius: 14px;
+    padding: 12px 14px;
+  }
+
+  .new-tab-submit {
+    width: 36px;
+    height: 36px;
+  }
+}

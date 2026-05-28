@@ -1,47 +1,140 @@
-import { useState, useEffect, useRef, use } from "react";
+import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
-import logo from "./assets/logos/Logo-White.png";
+import logo from "./assets/logos/Logo-Orange.png";
 import favicon from "./assets/logos/Favicon.png";
 import backIcon from "./assets/Icons/Back-Grey.png";
 import forwardIcon from "./assets/Icons/Forward-Grey.png";
 import refreshIcon from "./assets/Icons/Refresh-Grey.png";
-import bookmarkIcon from "./assets/Icons/Bookmark-Grey.png";
-import linkIcon from "./assets/Icons/Link-Grey.png";
-import workflowIcon from "./assets/Icons/Workflow-Grey.png";
-import extensionIcon from "./assets/Icons/Extension-White.png";
-import dropdownIcon from "./assets/Icons/Dropdown-White.png";
-import minimizeIcon from "./assets/Icons/Minimize-Grey.png";
-import maximizeIcon from "./assets/Icons/Maximize-Grey.png";
-import closeIcon from "./assets/Icons/Close-Grey.png";
-import profilePic from "./assets/Images/Profile-Pictures/Profile-Picture-1.jpg";
 import loadingAnimation from "./assets/Icons/loading-animation.gif";
 import cursorIcon from "./assets/Icons/cursor-white.png";
 import stopIcon from "./assets/Icons/Stop-white.png";
 import pauseIcon from "./assets/Icons/Pause-White.png";
 import playIcon from "./assets/Icons/Play-White.png";
+import NewTabPage from "./pages/NewTabPage";
+
+const NEW_TAB_URL = "indus://newtab";
+const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
+const isNewTabUrl = (url: string) => url === NEW_TAB_URL;
+
+function getFaviconUrl(pageUrl: string) {
+  try {
+    if (isNewTabUrl(pageUrl)) {
+      return null;
+    }
+    const u = new URL(pageUrl);
+    return u.origin + "/favicon.ico";
+  } catch {
+    return null;
+  }
+}
+
+type Tab = {
+  id: string;
+  url: string;
+  title?: string;
+  isActive: boolean;
+  faviconUrl?: string | null;
+  isLoading?: boolean;
+  history: string[];
+  historyIndex: number;
+};
+
+const DEFAULT_TABS: Tab[] = [
+  {
+    id: "1Kw345fg178",
+    url: "https://example.com",
+    isActive: false,
+    title: "Example",
+    faviconUrl: null,
+    isLoading: false,
+    history: ["https://example.com"],
+    historyIndex: 0,
+  },
+  {
+    id: "2witsnghfiw",
+    url: "https://github.com",
+    isActive: true,
+    title: "GitHub",
+    faviconUrl: null,
+    isLoading: false,
+    history: ["https://github.com"],
+    historyIndex: 0,
+  },
+];
+
+function cloneTabs(tabs: Tab[]): Tab[] {
+  return tabs.map((tab) => ({
+    ...tab,
+    history: [...tab.history],
+  }));
+}
+
+function normalizeTabs(tabs: unknown): Tab[] {
+  if (!Array.isArray(tabs) || tabs.length === 0) {
+    return cloneTabs(DEFAULT_TABS);
+  }
+
+  const normalizedTabs = tabs
+    .map((tab: any) => {
+      const url = typeof tab?.url === "string" && tab.url ? tab.url : NEW_TAB_URL;
+      const history = Array.isArray(tab?.history)
+        ? tab.history.filter((entry: unknown): entry is string => typeof entry === "string" && entry.length > 0)
+        : [];
+      const resolvedHistory = history.length > 0 ? history : [url];
+      const resolvedHistoryIndex = typeof tab?.historyIndex === "number"
+        ? Math.min(Math.max(0, Math.floor(tab.historyIndex)), resolvedHistory.length - 1)
+        : resolvedHistory.length - 1;
+
+      return {
+        id: typeof tab?.id === "string" && tab.id ? tab.id : crypto.randomUUID(),
+        url,
+        title: typeof tab?.title === "string" ? tab.title : undefined,
+        isActive: Boolean(tab?.isActive),
+        faviconUrl: typeof tab?.faviconUrl === "string" || tab?.faviconUrl === null ? tab.faviconUrl : null,
+        isLoading: Boolean(tab?.isLoading),
+        history: resolvedHistory,
+        historyIndex: resolvedHistoryIndex,
+      } as Tab;
+    })
+    .filter((tab: Tab) => typeof tab.url === "string" && tab.url.length > 0);
+
+  if (normalizedTabs.length === 0) {
+    return cloneTabs(DEFAULT_TABS);
+  }
+
+  if (!normalizedTabs.some((tab) => tab.isActive)) {
+    normalizedTabs[normalizedTabs.length - 1].isActive = true;
+  }
+
+  return normalizedTabs;
+}
+
+function loadPersistedTabs(): Tab[] {
+  try {
+    const raw = window.localStorage.getItem(TAB_STATE_STORAGE_KEY);
+    if (!raw) {
+      return cloneTabs(DEFAULT_TABS);
+    }
+
+    return normalizeTabs(JSON.parse(raw));
+  } catch {
+    return cloneTabs(DEFAULT_TABS);
+  }
+}
 
 function App() {
 
-  type Tab = {
-    id: string;
-    url: string;
-    title?: string;
-    isActive: boolean;
-    faviconUrl?: string | null;
-    isLoading?: boolean;
-  };
-
   function activateTab(targetId: string) {
-    let newTabs = tabs.map(tab =>
-    tab.id === targetId
-      ? { ...tab, isActive: true }
-      : { ...tab, isActive: false }
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === targetId ? { ...tab, isActive: true } : { ...tab, isActive: false }
+      )
     );
-    setTabs(newTabs);
   }
 
   function addTab(newUrl: string) {
+    const isNewTab = isNewTabUrl(newUrl);
     setTabs((currentTabs) => {
       const newTab: Tab = {
         id: crypto.randomUUID(),
@@ -49,7 +142,9 @@ function App() {
         title: "New Tab",
         isActive: true,
         faviconUrl: null,
-        isLoading: true
+        isLoading: !isNewTab,
+        history: [newUrl],
+        historyIndex: 0,
       };
       return [...currentTabs.map(tab => ({ ...tab, isActive: false })), newTab];
     });
@@ -62,7 +157,7 @@ function App() {
 
   useEffect(() => {
     const handler = () => {
-      addTab("https://google.com");
+      addTab(NEW_TAB_URL);
     };
 
     const cleanup = (window as any).api?.onNewTab(handler);
@@ -92,15 +187,20 @@ function App() {
     return cleanup;
   }, []);
 
-  const [tabs, setTabs] = useState<Tab[]>([
-    { id: "1Kw345fg178", url: "https://example.com", isActive: false, title: "Example" },
-    { id: "2witsnghfiw", url: "https://github.com", isActive: true, title: "GitHub" },
-  ]);
+  const [tabs, setTabs] = useState<Tab[]>(() => loadPersistedTabs());
 
   // Keep a ref to always have the current tabs
   const tabsRef = useRef(tabs);
   useEffect(() => {
     tabsRef.current = tabs;
+  }, [tabs]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TAB_STATE_STORAGE_KEY, JSON.stringify(tabs));
+    } catch {
+      // Ignore storage failures and keep the browser usable.
+    }
   }, [tabs]);
 
   // Expose tabs to the main process via executeJavaScript
@@ -300,8 +400,6 @@ function App() {
     };
   }, [tabs]);
 
-  const [isDarkTheme, setIsDarkTheme] = useState(true);
-  const [showMenu, setShowMenu] = useState(false);
   const [showMouseCoords, setShowMouseCoords] = useState(false);
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
@@ -447,24 +545,24 @@ function App() {
       const windowWidth = window.innerWidth;
       let reservedSpace = 0;
       
-      // Padding (6px left + 6px right)
-      reservedSpace += 12;
+      // Padding
+      reservedSpace += 20;
       
-      // New tab button (approx 40px)
-      reservedSpace += 40;
+      // New tab button
+      reservedSpace += 32;
 
       // Platform specific controls
       if (platform === 'darwin') {
-        reservedSpace += 80; // ~72px + buffer
+        reservedSpace += 80;
       } else if (platform === 'win32') {
-        reservedSpace += 150; // ~138px + buffer
+        reservedSpace += 150;
       }
 
       // Extra safety buffer
       reservedSpace += 20;
 
-      // Gaps between tabs (2px each)
-      const totalGaps = Math.max(0, tabs.length - 1) * 2;
+      // Gaps between tabs (6px each)
+      const totalGaps = Math.max(0, tabs.length - 1) * 6;
       
       const availableWidth = windowWidth - reservedSpace - totalGaps;
       
@@ -503,25 +601,21 @@ function App() {
     (window as any).api?.onReloadActiveTab(handleReloadActiveTab);
   }, []);
 
-  function toggleTheme() {
-    setIsDarkTheme(!isDarkTheme);
-  }
-
   function handleMinimize() {
-    if (window.api?.minimizeWindow) {
-      window.api.minimizeWindow();
+    if ((window as any).api?.minimizeWindow) {
+      (window as any).api.minimizeWindow();
     }
   }
 
   function handleMaximize() {
-    if (window.api?.maximizeWindow) {
-      window.api.maximizeWindow();
+    if ((window as any).api?.maximizeWindow) {
+      (window as any).api.maximizeWindow();
     }
   }
 
   function handleClose() {
-    if (window.api?.closeWindow) {
-      window.api.closeWindow();
+    if ((window as any).api?.closeWindow) {
+      (window as any).api.closeWindow();
     }
   }
 
@@ -530,44 +624,96 @@ function App() {
   useEffect(() => {
     const activeTab = tabs.find(t => t.isActive);
     if (activeTab) {
-      if (activeTab.url !== "https://www.google.com/"){
-        setAddressBarValue(activeTab.url);
-      } else {
+      if (isNewTabUrl(activeTab.url)) {
         setAddressBarValue("");
+      } else {
+        setAddressBarValue(activeTab.url);
       }
     }
   }, [tabs]);
   
   function handleUserAddressBarInput(newValue: string) {
     (document.activeElement as HTMLElement)?.blur();
-    if (!(newValue.startsWith("http://") || newValue.startsWith("https://"))) {
-      newValue = "https://www.google.com/search?q=" + encodeURIComponent(newValue);
+    const trimmed = newValue.trim();
+    if (!trimmed) {
+      setAddressBarValue("");
+      return;
     }
-    setAddressBarValue(newValue);
+    let url = trimmed;
+    if (!(url.startsWith("http://") || url.startsWith("https://"))) {
+      url = "https://www.google.com/search?q=" + encodeURIComponent(url);
+    }
+    navigateActiveTabToUrl(url);
+  }
+
+  function navigateActiveTabToUrl(url: string) {
+    const targetTabId = activeTabId ?? tabsRef.current.find(tab => tab.isActive)?.id;
+    if (!targetTabId) return;
+    const isNewTab = isNewTabUrl(url);
+    setAddressBarValue(isNewTab ? "" : url);
     setTabs((currentTabs) =>
       currentTabs.map((tab) =>
-        tab.isActive ? { ...tab, url: newValue } : tab
+        tab.id !== targetTabId
+          ? tab
+          : (() => {
+              const history = tab.history?.length ? tab.history : [tab.url];
+              const nextHistory = history.slice(0, Math.max(0, tab.historyIndex + 1));
+              if (nextHistory[nextHistory.length - 1] !== url) {
+                nextHistory.push(url);
+              }
+
+              return {
+                ...tab,
+                url,
+                isLoading: !isNewTab,
+                faviconUrl: isNewTab ? null : getFaviconUrl(url),
+                history: nextHistory,
+                historyIndex: nextHistory.length - 1,
+              };
+            })()
       )
     );
+  }
+
+  function handleNewTabSearch(query: string) {
+    const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query);
+    navigateActiveTabToUrl(searchUrl);
   }
 
   function updateTabUrl(tabId: string, newUrl: string) {
     setTabs((currentTabs) =>
       currentTabs.map((tab) =>
-        tab.id === tabId ? { ...tab, url: newUrl } : tab
+        tab.id !== tabId
+          ? tab
+          : (() => {
+              const history = tab.history?.length ? tab.history : [tab.url];
+              const currentHistoryUrl = history[Math.min(tab.historyIndex, history.length - 1)];
+
+              if (currentHistoryUrl === newUrl) {
+                return {
+                  ...tab,
+                  url: newUrl,
+                  faviconUrl: isNewTabUrl(newUrl) ? null : getFaviconUrl(newUrl),
+                };
+              }
+
+              const nextHistory = history.slice(0, Math.max(0, tab.historyIndex + 1));
+              nextHistory.push(newUrl);
+
+              return {
+                ...tab,
+                url: newUrl,
+                faviconUrl: isNewTabUrl(newUrl) ? null : getFaviconUrl(newUrl),
+                history: nextHistory,
+                historyIndex: nextHistory.length - 1,
+              };
+            })()
       )
     );
-    // Update address bar if this is the active tab
     const activeTab = tabsRef.current.find(t => t.isActive);
     if (activeTab && activeTab.id === tabId) {
-      setAddressBarValue(newUrl);
+      setAddressBarValue(isNewTabUrl(newUrl) ? "" : newUrl);
     }
-
-    setTabs((currentTabs) =>
-      currentTabs.map((tab) => ({
-        ...tab, faviconUrl: getFaviconUrl(tab.url)
-      })))
-
   }
 
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -583,32 +729,47 @@ function App() {
 
 
   function goBack() {
-    if (!activeTabId) return;
+    const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (!activeTab || activeTab.historyIndex <= 0) return;
 
-    const webview = webviewRefs.current.get(activeTabId);
-    if (webview && (webview as any).canGoBack()) {
-      (webview as any).goBack();
-    }
+    const targetIndex = activeTab.historyIndex - 1;
+    const targetUrl = activeTab.history[targetIndex];
+
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === activeTab.id
+          ? {
+              ...tab,
+              url: targetUrl,
+              historyIndex: targetIndex,
+              isLoading: true,
+              faviconUrl: isNewTabUrl(targetUrl) ? null : getFaviconUrl(targetUrl),
+            }
+          : tab
+      )
+    );
   }
 
   function goForward() {
-    if (!activeTabId) return;
+    const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (!activeTab || activeTab.historyIndex >= activeTab.history.length - 1) return;
 
-    const webview = webviewRefs.current.get(activeTabId);
-    if (webview && (webview as any).canGoForward()) {
-      (webview as any).goForward();
-    }
-  }
+    const targetIndex = activeTab.historyIndex + 1;
+    const targetUrl = activeTab.history[targetIndex];
 
-
-
-  function getFaviconUrl(pageUrl: string) {
-    try {
-      var u = new URL(pageUrl);
-      return u.origin + "/favicon.ico";
-    } catch {
-      return null;
-    }
+    setTabs((currentTabs) =>
+      currentTabs.map((tab) =>
+        tab.id === activeTab.id
+          ? {
+              ...tab,
+              url: targetUrl,
+              historyIndex: targetIndex,
+              isLoading: true,
+              faviconUrl: isNewTabUrl(targetUrl) ? null : getFaviconUrl(targetUrl),
+            }
+          : tab
+      )
+    );
   }
 
 
@@ -627,7 +788,7 @@ function App() {
       if (url) {
         addTab(url);
       } else {
-        addTab("https://www.google.com");
+        addTab(NEW_TAB_URL);
       }
     });
     return () => cleanup?.();
@@ -666,7 +827,7 @@ function App() {
   }, []);
 
   return (
-    <div className={`app-container ${isDarkTheme ? "dark" : ""}`}>
+    <div className="app-container dark">
       {/* Agent click cursor flash */}
       {agentCursor && (
         <img
@@ -719,16 +880,7 @@ function App() {
 
       {/* Tab Bar */}
       <div className="tab-bar">
-        {/* Window Controls - Mac (left side) */}
-        {platform === 'darwin' && (
-          <div className="window-controls window-controls-mac">
-            <button className="mac-control mac-close" onClick={handleClose}></button>
-            <button className="mac-control mac-minimize" onClick={handleMinimize}></button>
-            <button className="mac-control mac-maximize" onClick={handleMaximize}></button>
-          </div>
-        )}
-
-        {tabs.map((tab, idx) => (
+        {tabs.map((tab) => (
             <div
             key={tab.id}
             onClick={() => activateTab(tab.id)}
@@ -739,7 +891,7 @@ function App() {
               <img src={loadingAnimation} className="loading-animation" />
             ) : (
               <img
-              src={tab.faviconUrl ? tab.faviconUrl : favicon}
+              src={tab.faviconUrl ? tab.faviconUrl : (isNewTabUrl(tab.url) ? logo : favicon)}
               alt=""
               className="tab-favicon"
               onError={(e) => {
@@ -748,7 +900,10 @@ function App() {
               />
             )}
             <span className="tab-title">
-              {tab.title || tab.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}
+              {tab.title || (isNewTabUrl(tab.url)
+                ? "New Tab"
+                : tab.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]
+              )}
             </span>
             <span
               className="tab-close"
@@ -757,12 +912,14 @@ function App() {
               closeTab(tab.id);
               }}
             >
-              ×
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                <path d="M9,1L1,9M1,1l8,8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
             </span>
             </div>
         ))}
         <button 
-          onClick={() => addTab("https://google.com")}
+          onClick={() => addTab(NEW_TAB_URL)}
           className="new-tab-button"
         >
           +
@@ -772,13 +929,13 @@ function App() {
         {platform === 'win32' && (
           <div className="window-controls window-controls-windows">
             <button className="win-control" onClick={handleMinimize}>
-              <img src={minimizeIcon} alt="Minimize" />
+              <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="4" width="8" height="1" fill="currentColor"/></svg>
             </button>
             <button className="win-control" onClick={handleMaximize}>
-              <img src={maximizeIcon} alt="Maximize" />
+              <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1,1v8h8V1H1z M8,8H2V2h6V8z" fill="currentColor"/></svg>
             </button>
             <button className="win-control win-close" onClick={handleClose}>
-              <img src={closeIcon} alt="Close" />
+              <svg width="10" height="10" viewBox="0 0 10 10"><path d="M10,1L9,0L5,4L1,0L0,1l4,4L0,9l1,1l4-4l4,4l1-1L6,5L10,1z" fill="currentColor"/></svg>
             </button>
           </div>
         )}
@@ -795,10 +952,14 @@ function App() {
 
         {/* Address Bar */}
         <div className="address-bar">
-          <img src={favicon} alt="" className="address-favicon" />
+          <span className="address-search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" fill="none" />
+              <path d="M16.5 16.5L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </span>
           <input 
             type="text" 
-            placeholder="Ask anything or navigate..."
             value={AddressBarValue} 
             onChange={(e) => setAddressBarValue(e.target.value)}
             className="address-input" 
@@ -809,66 +970,51 @@ function App() {
               }
             }}
           />
-          <div className="address-actions">
-            <button className="address-action" title="Bookmark">
-              <img src={bookmarkIcon} alt="Bookmark" />
-            </button>
-            <button className="address-action" title="Copy Link">
-              <img src={linkIcon} alt="Link" />
-            </button>
-          </div>
         </div>
 
         {/* Right Side Icons */}
         <div className="toolbar-right">
-          <button className="icon-button workflow-button" title="Workflows">
-            <img src={workflowIcon} alt="Workflows" />
-            <span>Workflows</span>
-          </button>
           <button 
-            className={`icon-button ${showAssistant ? "active" : ""}`} 
-            title="Assistant" 
+            className={`icon-button agent-button ${showAssistant ? "active" : ""}`} 
+            title="Agent" 
             onClick={() => setShowAssistant(!showAssistant)}
           >
-            <img src={logo} alt="" className="assistant-icon" />Assistant
+            <img src={logo} alt="" className="assistant-icon" />Agent
           </button>
-          <button className="icon-button"><img src={extensionIcon} alt="Extensions" /></button>
-          <div style={{ position: "relative" }}>
-            <button className="icon-button" onClick={() => setShowMenu(!showMenu)}>
-              <img src={dropdownIcon} alt="Menu" />
-            </button>
-            {showMenu && (
-              <div className="dropdown-menu">
-                <div className="menu-item" onClick={() => { toggleTheme(); setShowMenu(false); }}>
-                  {isDarkTheme ? "☀️" : "🌙"} {isDarkTheme ? "Light" : "Dark"} Theme
-                </div>
-              </div>
-            )}
-          </div>
-          <img src={profilePic} alt="Profile" className="profile-pic" />
         </div>
       </div>
 
       {/* Webview Container */}
       <div className="webview-container" ref={webviewContainerRef}>
         {tabs.map((tab) => (
-          <webview
-            ref={(el) => {
-              if (el) {
-                webviewRefs.current.set(tab.id, el);
-              } else {
-                webviewRefs.current.delete(tab.id);
-              }
-            }}
-            key={tab.id}
-            src={tab.url}
-            // @ts-ignore
-            allowpopups="true"
-            style={{ 
-              flex: 1, height: "100%",
-              display: tab.isActive ? "flex" : "none"
-            }}
-          />  
+          isNewTabUrl(tab.url) ? (
+            <div
+              key={tab.id}
+              className="new-tab-shell"
+              style={{ display: tab.isActive ? "flex" : "none" }}
+            >
+              <NewTabPage displayName="npsboy" onSearch={handleNewTabSearch} />
+            </div>
+          ) : (
+            <webview
+              ref={(el) => {
+                if (el) {
+                  webviewRefs.current.set(tab.id, el);
+                } else {
+                  webviewRefs.current.delete(tab.id);
+                }
+              }}
+              key={tab.id}
+              src={tab.url}
+              partition="persist:indus-browser"
+              // @ts-ignore
+              allowpopups="true"
+              style={{ 
+                flex: 1, height: "100%",
+                display: tab.isActive ? "flex" : "none"
+              }}
+            />
+          )
         ))}
 
         {showAssistant && (

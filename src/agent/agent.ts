@@ -1015,10 +1015,11 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
 
         for (let taskIndex = startTaskIndex; taskIndex < tasks.length; taskIndex += 1) {
             currentTaskIndex = taskIndex;
-            const currentTask = tasks[taskIndex];
+            let currentTask = tasks[taskIndex];
         
             past_actions = [];
             lastCursorPos = null;
+            let overridePrompt: string | null = null;
             
             while (true) {
                 try {
@@ -1028,7 +1029,10 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                     // Wait if paused (returns true if stopped while paused)
                     if (await waitIfPaused()) break;
 
-                    console.log("Running agent with instruction:", currentTask);
+                    let promptToUse = overridePrompt || currentTask;
+                    overridePrompt = null; // Clear it so it only applies to this immediate next run
+
+                    console.log("Running agent with instruction:", promptToUse);
                     throwIfStopped();
 
                     let screenshotResult = await takeScreenshot();
@@ -1049,7 +1053,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                     const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
                     const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
                         mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
-                    const response = await GetAction(currentTask, screenshot, currentUrl, openTabs);
+                    const response = await GetAction(promptToUse, screenshot, currentUrl, openTabs);
                     throwIfStopped();
                     if (!response) {
                         throw new Error("Agent action endpoint returned no response.");
@@ -1139,7 +1143,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                             console.log("Supervisor detected abnormal repetition.");
                             if (supervisorResponse.refined_prompt) {
                                 console.log("Supervisor provided a refined prompt: ", supervisorResponse.refined_prompt);
-                                tasks[taskIndex] = supervisorResponse.refined_prompt;
+                                overridePrompt = supervisorResponse.refined_prompt;
                             }
                         }
                     }
