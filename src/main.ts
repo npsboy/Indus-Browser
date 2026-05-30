@@ -14,10 +14,12 @@ function attachShortcutHandler(contents) {
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:reload-active-tab");
             break;
         case "t":
+            if (input.isAutoRepeat) return;
             event.preventDefault();
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:new-tab");
             break;
         case "w":
+            if (input.isAutoRepeat) return;
             event.preventDefault();
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:close-active-tab");
             break;

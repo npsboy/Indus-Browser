@@ -328,27 +328,48 @@ export function translateCoordinates(
     };
 }
 
+type ActiveSurface = {
+    wc: Electron.WebContents;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    kind: "webview" | "renderer";
+};
+
 /** Returns the active webview's guest WebContents and its bounds in window-space. */
-async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: number; y: number; w: number; h: number } | null> {
+async function getActiveWebviewWc(): Promise<ActiveSurface | null> {
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) return null;
 
     // Ask the renderer for the active webview's bounding rect AND its WebContents ID
     // so we can precisely identify the right WebContents when multiple tabs are open.
-    const info: { x: number; y: number; w: number; h: number; wcId: number | null } | null =
+    const info:
+        | { mode: "webview"; x: number; y: number; w: number; h: number; wcId: number | null }
+        | { mode: "renderer"; x: number; y: number; w: number; h: number }
+        | null =
         await win.webContents.executeJavaScript(`
             (() => {
                 const wv = document.querySelector('webview[style*="display: flex"]');
-                if (!wv) return null;
-                const r = wv.getBoundingClientRect();
-                let wcId = null;
-                try {
-                    wcId = wv.getWebContentsId();
-                } catch {
-                    // Can happen briefly while a new tab/webview is being attached.
-                    wcId = null;
+                if (wv) {
+                    const r = wv.getBoundingClientRect();
+                    let wcId = null;
+                    try {
+                        wcId = wv.getWebContentsId();
+                    } catch {
+                        // Can happen briefly while a new tab/webview is being attached.
+                        wcId = null;
+                    }
+                    return { mode: 'webview', x: r.left, y: r.top, w: r.width, h: r.height, wcId };
                 }
-                return { x: r.left, y: r.top, w: r.width, h: r.height, wcId };
+
+                const shell = document.querySelector('.new-tab-shell[style*="display: flex"]');
+                if (shell) {
+                    const r = shell.getBoundingClientRect();
+                    return { mode: 'renderer', x: r.left, y: r.top, w: r.width, h: r.height };
+                }
+
+                return null;
             })()
         `).catch((error) => {
             const message = error instanceof Error ? error.message : String(error);
@@ -357,8 +378,19 @@ async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: numb
         });
 
     if (!info) {
-        console.warn("Could not find active webview bounds");
+        console.warn("Could not find active interaction surface bounds");
         return null;
+    }
+
+    if (info.mode === "renderer") {
+        return {
+            wc: win.webContents,
+            x: info.x,
+            y: info.y,
+            w: info.w,
+            h: info.h,
+            kind: "renderer",
+        };
     }
 
     if (!info.wcId) {
@@ -375,8 +407,8 @@ async function getActiveWebviewWc(): Promise<{ wc: Electron.WebContents; x: numb
         return null;
     }
 
-    const { wcId: _id, ...bounds } = info;
-    return { wc: guestWc, ...bounds };
+    const { wcId: _id, mode: _mode, ...bounds } = info;
+    return { wc: guestWc, ...bounds, kind: "webview" };
 }
 
 async function takeScreenshot(): Promise<{ base64: string; w: number; h: number; winW: number; winH: number } | null> {
@@ -384,7 +416,7 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
     const MAX_RETRIES = 8;
     const RETRY_DELAY_MS = 750;
 
-    let webviewInfo: { wc: Electron.WebContents; x: number; y: number; w: number; h: number } | null = null;
+    let webviewInfo: ActiveSurface | null = null;
     let image: Electron.NativeImage | null = null;
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -393,10 +425,19 @@ async function takeScreenshot(): Promise<{ base64: string; w: number; h: number;
         }
         webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) {
-            console.warn(`takeScreenshot: no active webview (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            console.warn(`takeScreenshot: no active interaction surface (attempt ${attempt + 1}/${MAX_RETRIES})`);
             continue;
         }
-        image = await webviewInfo.wc.capturePage();
+        if (webviewInfo.kind === "renderer") {
+            image = await webviewInfo.wc.capturePage({
+                x: Math.round(webviewInfo.x),
+                y: Math.round(webviewInfo.y),
+                width: Math.max(1, Math.round(webviewInfo.w)),
+                height: Math.max(1, Math.round(webviewInfo.h)),
+            });
+        } else {
+            image = await webviewInfo.wc.capturePage();
+        }
         const imageSize = image.getSize();
         if (imageSize.width > 0 && imageSize.height > 0) {
             break; // Got a valid frame
@@ -639,12 +680,15 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:click") {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) {
-            console.error("Cannot click: no active webview found");
+            console.error("Cannot click: no active interaction surface found");
             return;
         }
-        const snappedPoint = await snapToNearestClickablePoint(webviewInfo.wc, cmd.x, cmd.y);
-        const relX = snappedPoint.x;
-        const relY = snappedPoint.y;
+        const isRendererSurface = webviewInfo.kind === "renderer";
+        const targetXInWc = isRendererSurface ? Math.round(webviewInfo.x + cmd.x) : cmd.x;
+        const targetYInWc = isRendererSurface ? Math.round(webviewInfo.y + cmd.y) : cmd.y;
+        const snappedPoint = await snapToNearestClickablePoint(webviewInfo.wc, targetXInWc, targetYInWc);
+        const relX = isRendererSurface ? Math.round(snappedPoint.x - webviewInfo.x) : snappedPoint.x;
+        const relY = isRendererSurface ? Math.round(snappedPoint.y - webviewInfo.y) : snappedPoint.y;
         lastCursorPos = { x: relX, y: relY };
 
         BrowserWindow.getAllWindows()[0]?.focus();
@@ -658,8 +702,10 @@ async function executeCommand(cmd: any): Promise<void> {
             ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
             : electronScreen.getPrimaryDisplay();
         const sf = display.scaleFactor ?? 1;
-        const physX = Math.round(relX * sf);
-        const physY = Math.round(relY * sf);
+        const eventX = isRendererSurface ? Math.round(webviewInfo.x + relX) : relX;
+        const eventY = isRendererSurface ? Math.round(webviewInfo.y + relY) : relY;
+        const physX = Math.round(eventX * sf);
+        const physY = Math.round(eventY * sf);
 
         // Native input events — these are trusted (isTrusted=true) and work on
         // all sites including those that reject synthetic JS events.
@@ -675,7 +721,7 @@ async function executeCommand(cmd: any): Promise<void> {
         await webviewInfo.wc.executeJavaScript(`
             (function() {
                 const CLICKABLE_TAGS = new Set(['a','button','input','select','textarea','label']);
-                let el = document.elementFromPoint(${relX}, ${relY});
+                let el = document.elementFromPoint(${eventX}, ${eventY});
                 while (el && el !== document.documentElement && el !== document.body) {
                     const tag = el.tagName.toLowerCase();
                     const role = (el.getAttribute('role') || '').toLowerCase();
@@ -688,7 +734,7 @@ async function executeCommand(cmd: any): Promise<void> {
                     el = el.parentElement;
                 }
                 // Nothing semantic found — click whatever is directly at the point.
-                const leaf = document.elementFromPoint(${relX}, ${relY});
+                const leaf = document.elementFromPoint(${eventX}, ${eventY});
                 if (leaf) leaf.click();
             })()
         `).catch(() => {});
@@ -755,8 +801,10 @@ async function executeCommand(cmd: any): Promise<void> {
             ? electronScreen.getDisplayNearestPoint({ x: scrollWinBounds.x, y: scrollWinBounds.y })
             : electronScreen.getPrimaryDisplay();
         const scrollSf = scrollDisplay.scaleFactor ?? 1;
-        const scrollPhysX = Math.round(cmd.x * scrollSf);
-        const scrollPhysY = Math.round(cmd.y * scrollSf);
+        const scrollX = webviewInfo.kind === "renderer" ? Math.round(webviewInfo.x + cmd.x) : cmd.x;
+        const scrollY = webviewInfo.kind === "renderer" ? Math.round(webviewInfo.y + cmd.y) : cmd.y;
+        const scrollPhysX = Math.round(scrollX * scrollSf);
+        const scrollPhysY = Math.round(scrollY * scrollSf);
         webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: scrollPhysX, y: scrollPhysY, movementX: 0, movementY: 0 } as any);
         // cmd.x/y are already webview-relative — no offset subtraction needed.
         webviewInfo.wc.sendInputEvent({ type: 'mouseWheel', x: scrollPhysX, y: scrollPhysY, deltaX: cmd.deltaX ?? 0, deltaY: cmd.deltaY ?? 0, canScroll: true } as any);
@@ -1050,7 +1098,10 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
 
                     throwIfStopped();
 
-                    const currentUrl = (await getActiveWebviewWc())?.wc.getURL() ?? undefined;
+                    const activeSurface = await getActiveWebviewWc();
+                    const currentUrl = activeSurface?.kind === "webview"
+                        ? activeSurface.wc.getURL()
+                        : undefined;
                     const openTabs: { id: string; url: string; title?: string; isActive: boolean }[] =
                         mainWc ? await mainWc.executeJavaScript('window.__tabs || []').catch(() => []) : [];
                     const response = await GetAction(promptToUse, screenshot, currentUrl, openTabs);
