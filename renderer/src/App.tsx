@@ -18,6 +18,16 @@ const NEW_TAB_URL = "indus://newtab";
 const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
 const isNewTabUrl = (url: string) => url === NEW_TAB_URL;
 const isChatUrl = (url: string) => url.startsWith("indus://chat");
+type DispatcherRoute = {
+  routing: "web-search" | "ai-chat";
+  chatTitle?: string;
+};
+type ApiResponse = {
+  error?: boolean;
+  data?: unknown;
+  status?: number;
+  text?: string;
+};
 
 function getFaviconUrl(pageUrl: string) {
   try {
@@ -123,6 +133,76 @@ function loadPersistedTabs(): Tab[] {
   } catch {
     return cloneTabs(DEFAULT_TABS);
   }
+}
+
+function googleSearchUrl(query: string) {
+  return "https://www.google.com/search?q=" + encodeURIComponent(query);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error("Dispatcher request timed out"));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
+}
+
+function parseDispatcherJson(text: string): DispatcherRoute | null {
+  const trimmed = text
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parseDispatcherRoute(parsed);
+  } catch {
+    const routingMatch = trimmed.match(/routing\s*[:=]\s*["']?(web-search|ai-chat)["']?/i);
+    if (!routingMatch) return null;
+
+    const chatTitleMatch = trimmed.match(/chatTitle\s*[:=]\s*["']([^"']+)["']/i);
+    return {
+      routing: routingMatch[1] as DispatcherRoute["routing"],
+      chatTitle: chatTitleMatch?.[1],
+    };
+  }
+}
+
+function parseDispatcherRoute(value: unknown): DispatcherRoute | null {
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    return parseDispatcherJson(value);
+  }
+
+  if (typeof value !== "object") return null;
+
+  const data = value as Record<string, unknown>;
+  if (data.routing === "web-search" || data.routing === "ai-chat") {
+    return {
+      routing: data.routing,
+      chatTitle: typeof data.chatTitle === "string" ? data.chatTitle : undefined,
+    };
+  }
+
+  for (const key of ["reply", "output", "message", "content", "data"]) {
+    const nested = parseDispatcherRoute(data[key]);
+    if (nested) return nested;
+  }
+
+  return null;
 }
 
 function App() {
@@ -685,9 +765,32 @@ function App() {
     );
   }
 
-  function handleNewTabSearch(query: string) {
-    const searchUrl = "indus://chat?q=" + encodeURIComponent(query);
-    navigateActiveTabToUrl(searchUrl);
+  async function handleNewTabSearch(query: string) {
+    try {
+      const dispatcherRequest = (window as any).api?.dispatcherRequest?.(query);
+      if (!dispatcherRequest) {
+        navigateActiveTabToUrl(googleSearchUrl(query));
+        return;
+      }
+
+      const response = await withTimeout<ApiResponse>(dispatcherRequest, 2000);
+      const route = !response?.error ? parseDispatcherRoute(response?.data) : null;
+
+      if (route?.routing === "web-search") {
+        navigateActiveTabToUrl(googleSearchUrl(query));
+        return;
+      }
+
+      const chatUrl = new URL("indus://chat");
+      chatUrl.searchParams.set("q", query);
+      if (route?.chatTitle?.trim()) {
+        chatUrl.searchParams.set("title", route.chatTitle.trim());
+      }
+      navigateActiveTabToUrl(chatUrl.toString());
+    } catch (error) {
+      console.error("Dispatcher route failed", error);
+      navigateActiveTabToUrl(googleSearchUrl(query));
+    }
   }
 
   function updateTabUrl(tabId: string, newUrl: string) {

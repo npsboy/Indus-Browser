@@ -1,7 +1,25 @@
 import { app, BrowserWindow } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
+import { readFileSync } from "fs";
 import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
+
+const dispatcherPrompt = readFileSync(path.join(__dirname, "agent/prompts/dispatcher-prompt.md"), "utf-8");
+
+async function postChat(payload: any) {
+    const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+        return { error: true, status: response.status, text: await response.text() };
+    }
+
+    const data = await response.json();
+    return { error: false, data };
+}
 
 function attachShortcutHandler(contents) {
   contents.on("before-input-event", function (event, input) {
@@ -135,16 +153,21 @@ ipcMain.on('agent:resume', () => {
 
 ipcMain.handle('chat-request', async (_event, payload) => {
     try {
-        const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+        return await postChat(payload);
+    } catch (error: any) {
+        return { error: true, status: 0, text: error.message };
+    }
+});
+
+ipcMain.handle('dispatcher-request', async (_event, text: string) => {
+    try {
+        return await postChat({
+            agentRole: "dispatcher",
+            messages: [
+                { role: "system", content: dispatcherPrompt },
+                { role: "user", content: text }
+            ]
         });
-        if (!response.ok) {
-            return { error: true, status: response.status, text: await response.text() };
-        }
-        const data = await response.json();
-        return { error: false, data };
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
     }

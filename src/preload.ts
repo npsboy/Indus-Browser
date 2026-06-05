@@ -101,6 +101,10 @@ function chatRequest(payload: any): Promise<any> {
     return ipcRenderer.invoke('chat-request', payload);
 }
 
+function dispatcherRequest(text: string): Promise<any> {
+    return ipcRenderer.invoke('dispatcher-request', text);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -123,5 +127,6 @@ contextBridge.exposeInMainWorld('api', {
     onAgentDone,
     onAgentWarn,
     onOpenUrlInNewTab,
-    chatRequest
+    chatRequest,
+    dispatcherRequest
 });

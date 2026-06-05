@@ -38,10 +38,30 @@ function saveChats(chats: ChatSession[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(chats));
 }
 
+function useLoadingText(isLoading: boolean) {
+  const [dotCount, setDotCount] = useState(0);
+
+  useEffect(() => {
+    if (!isLoading) {
+      setDotCount(0);
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setDotCount((current) => (current + 1) % 4);
+    }, 400);
+
+    return () => window.clearInterval(intervalId);
+  }, [isLoading]);
+
+  return `Loading${dotCount > 0 ? ` ${".".repeat(dotCount)}` : ""}`;
+}
+
 export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: ChatPageProps) {
   const urlObj = new URL(initialUrl);
   const initialQuery = urlObj.searchParams.get("q") || "";
   const existingChatId = urlObj.searchParams.get("id");
+  const initialChatTitle = useRef((urlObj.searchParams.get("title") || "").trim()).current;
 
   const [chats, setChats] = useState<ChatSession[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(existingChatId);
@@ -58,6 +78,7 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
   const renameInputRef = useRef<HTMLInputElement>(null);
   const isCancellingRename = useRef(false);
   const initialized = useRef(false);
+  const loadingText = useLoadingText(isLoading);
   
   // Keep the tab URL in sync with the current chat ID
   useEffect(() => {
@@ -128,7 +149,7 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
       const activeId = currentChatId || crypto.randomUUID();
       if (!currentChatId) setCurrentChatId(activeId);
       
-      const title = messages[0]?.content.slice(0, 40) + "..." || "New Chat";
+      const title = initialChatTitle || (messages[0]?.content.slice(0, 40) + "..." || "New Chat");
       
       setChats(prev => {
         const existing = prev.find(c => c.id === activeId);
@@ -335,7 +356,7 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
                 </div>
               </div>
             ))}
-            {isLoading && <div className="chat-msg-row conversant"><div className="chat-bubble-inner conversant">Typing...</div></div>}
+            {isLoading && <div className="chat-msg-row conversant"><div className="chat-bubble-inner conversant">{loadingText}</div></div>}
             <div ref={messagesEndRef} />
           </div>
         </div>
