@@ -97,6 +97,10 @@ function onOpenUrlInNewTab(callback: (_event: any, url: string) => void) {
   return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
 }
 
+function chatRequest(payload: any): Promise<any> {
+    return ipcRenderer.invoke('chat-request', payload);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -118,5 +122,6 @@ contextBridge.exposeInMainWorld('api', {
     resumeAgent,
     onAgentDone,
     onAgentWarn,
-    onOpenUrlInNewTab
+    onOpenUrlInNewTab,
+    chatRequest
 });

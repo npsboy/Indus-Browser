@@ -133,6 +133,23 @@ ipcMain.on('agent:resume', () => {
     setAgentPaused(false);
 });
 
+ipcMain.handle('chat-request', async (_event, payload) => {
+    try {
+        const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            return { error: true, status: response.status, text: await response.text() };
+        }
+        const data = await response.json();
+        return { error: false, data };
+    } catch (error: any) {
+        return { error: true, status: 0, text: error.message };
+    }
+});
+
 let agentRunning = false;
 
 async function runAgent(instruction?: string){

@@ -12,14 +12,16 @@ import stopIcon from "./assets/Icons/Stop-white.png";
 import pauseIcon from "./assets/Icons/Pause-White.png";
 import playIcon from "./assets/Icons/Play-White.png";
 import NewTabPage from "./pages/NewTabPage";
+import ChatPage from "./pages/ChatPage";
 
 const NEW_TAB_URL = "indus://newtab";
 const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
 const isNewTabUrl = (url: string) => url === NEW_TAB_URL;
+const isChatUrl = (url: string) => url.startsWith("indus://chat");
 
 function getFaviconUrl(pageUrl: string) {
   try {
-    if (isNewTabUrl(pageUrl)) {
+    if (isNewTabUrl(pageUrl) || isChatUrl(pageUrl)) {
       return null;
     }
     const u = new URL(pageUrl);
@@ -468,8 +470,11 @@ function App() {
 
   const handleInputResize = () => {
     if (textareaRef.current) {
+      const MAX_HEIGHT = 200;
       textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+      const newHeight = Math.min(textareaRef.current.scrollHeight, MAX_HEIGHT);
+      textareaRef.current.style.height = `${newHeight}px`;
+      textareaRef.current.style.overflowY = textareaRef.current.scrollHeight > MAX_HEIGHT ? 'auto' : 'hidden';
     }
   };
 
@@ -676,7 +681,7 @@ function App() {
   }
 
   function handleNewTabSearch(query: string) {
-    const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query);
+    const searchUrl = "indus://chat?q=" + encodeURIComponent(query);
     navigateActiveTabToUrl(searchUrl);
   }
 
@@ -986,36 +991,50 @@ function App() {
 
       {/* Webview Container */}
       <div className="webview-container" ref={webviewContainerRef}>
-        {tabs.map((tab) => (
-          isNewTabUrl(tab.url) ? (
-            <div
-              key={tab.id}
-              className="new-tab-shell"
-              style={{ display: tab.isActive ? "flex" : "none" }}
-            >
-              <NewTabPage displayName="npsboy" onSearch={handleNewTabSearch} />
-            </div>
-          ) : (
-            <webview
-              ref={(el) => {
-                if (el) {
-                  webviewRefs.current.set(tab.id, el);
-                } else {
-                  webviewRefs.current.delete(tab.id);
-                }
-              }}
-              key={tab.id}
-              src={tab.url}
-              partition="persist:indus-browser"
-              // @ts-ignore
-              allowpopups="true"
-              style={{ 
-                flex: 1, height: "100%",
-                display: tab.isActive ? "flex" : "none"
-              }}
-            />
-          )
-        ))}
+        {tabs.map((tab) => {
+          if (isNewTabUrl(tab.url)) {
+            return (
+              <div
+                key={tab.id}
+                className="new-tab-shell"
+                style={{ display: tab.isActive ? "flex" : "none" }}
+              >
+                <NewTabPage displayName="npsboy" onSearch={handleNewTabSearch} />
+              </div>
+            );
+          } else if (isChatUrl(tab.url)) {
+            return (
+              <div
+                key={tab.id}
+                className="chat-page-shell"
+                style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
+              >
+                <ChatPage tabId={tab.id} initialUrl={tab.url} onUrlChange={(newUrl) => updateTabUrl(tab.id, newUrl)} />
+              </div>
+            );
+          } else {
+            return (
+              <webview
+                ref={(el) => {
+                  if (el) {
+                    webviewRefs.current.set(tab.id, el);
+                  } else {
+                    webviewRefs.current.delete(tab.id);
+                  }
+                }}
+                key={tab.id}
+                src={tab.url}
+                partition="persist:indus-browser"
+                // @ts-ignore
+                allowpopups="true"
+                style={{ 
+                  flex: 1, height: "100%",
+                  display: tab.isActive ? "flex" : "none"
+                }}
+              />
+            );
+          }
+        })}
 
         {showAssistant && (
           <div 
@@ -1108,6 +1127,13 @@ function App() {
                       e.preventDefault();
                       handleAgentSend();
                     }
+                  }}
+                  style={{
+                    minHeight: '40px',
+                    padding: '10px 14px',
+                    fontSize: '14px',
+                    resize: 'none',
+                    overflowY: 'hidden'
                   }}
                 />
                 {isAgentRunning ? (
