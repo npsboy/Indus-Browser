@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import "./ChatPage.css";
+import deleteIcon from "../assets/Icons/Delete-Red.png";
+import editIcon from "../assets/Icons/Edit-Grey.png";
+import moreIcon from "../assets/Icons/More-Grey.png";
 
 type ChatMessage = {
   role: "user" | "conversant" | "system";
@@ -46,8 +49,14 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
   const [input, setInput] = useState("");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [openMenuChatId, setOpenMenuChatId] = useState<string | null>(null);
+  const [editingChatId, setEditingChatId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chatMenuRef = useRef<HTMLDivElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const isCancellingRename = useRef(false);
   const initialized = useRef(false);
   
   // Keep the tab URL in sync with the current chat ID
@@ -83,6 +92,24 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (editingChatId) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [editingChatId]);
+
+  useEffect(() => {
+    const closeMenu = (event: MouseEvent) => {
+      if (!chatMenuRef.current?.contains(event.target as Node)) {
+        setOpenMenuChatId(null);
+      }
+    };
+
+    document.addEventListener("mousedown", closeMenu);
+    return () => document.removeEventListener("mousedown", closeMenu);
+  }, []);
 
   // Auto-resize textarea as input changes
   useEffect(() => {
@@ -164,6 +191,69 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
     setCurrentChatId(null);
     setMessages([]);
     setIsSidebarOpen(false);
+    setOpenMenuChatId(null);
+    setEditingChatId(null);
+  };
+
+  const renameChat = (chat: ChatSession) => {
+    setEditingChatId(chat.id);
+    setEditingTitle(chat.title);
+    setOpenMenuChatId(null);
+  };
+
+  const commitRename = () => {
+    if (!editingChatId) return;
+    if (isCancellingRename.current) {
+      isCancellingRename.current = false;
+      return;
+    }
+
+    const nextTitle = editingTitle.trim();
+    if (!nextTitle) {
+      setEditingChatId(null);
+      setEditingTitle("");
+      return;
+    }
+
+    setChats(prev => {
+      const updated = prev.map(c => c.id === editingChatId ? { ...c, title: nextTitle, updatedAt: Date.now() } : c);
+      saveChats(updated);
+      return updated;
+    });
+    setEditingChatId(null);
+    setEditingTitle("");
+  };
+
+  const cancelRename = () => {
+    isCancellingRename.current = true;
+    setEditingChatId(null);
+    setEditingTitle("");
+  };
+
+  const handleRenameKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitRename();
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
+  };
+
+  const deleteChat = (chatId: string) => {
+    setChats(prev => {
+      const updated = prev.filter(c => c.id !== chatId);
+      saveChats(updated);
+      return updated;
+    });
+
+    if (chatId === currentChatId) {
+      setCurrentChatId(null);
+      setMessages([]);
+    }
+    setOpenMenuChatId(null);
   };
 
   const currentChatTitle = chats.find(c => c.id === currentChatId)?.title || "New Chat";
@@ -187,7 +277,42 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
                   setIsSidebarOpen(false);
                 }}
               >
-                {chat.title}
+                {editingChatId === chat.id ? (
+                  <input
+                    ref={renameInputRef}
+                    className="chat-list-rename-input"
+                    value={editingTitle}
+                    onChange={(event) => setEditingTitle(event.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={handleRenameKeyDown}
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                ) : (
+                  <span className="chat-list-item-title">{chat.title}</span>
+                )}
+                <button
+                  className="chat-list-more-btn"
+                  type="button"
+                  aria-label={`Open options for ${chat.title}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setOpenMenuChatId(openMenuChatId === chat.id ? null : chat.id);
+                  }}
+                >
+                  <img src={moreIcon} alt="" />
+                </button>
+                {openMenuChatId === chat.id && (
+                  <div className="chat-item-menu" ref={chatMenuRef} onClick={(event) => event.stopPropagation()}>
+                    <button type="button" className="chat-item-menu-option" onClick={() => renameChat(chat)}>
+                      <img src={editIcon} alt="" />
+                      <span>Rename</span>
+                    </button>
+                    <button type="button" className="chat-item-menu-option delete" onClick={() => deleteChat(chat.id)}>
+                      <img src={deleteIcon} alt="" />
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

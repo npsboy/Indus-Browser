@@ -526,6 +526,7 @@
 /* Assistant Sidebar */
 .assistant-sidebar {
   /* width: 350px; Removed fixed width to allow inline style control */
+  --scrollbar-track: #09090b;
   background: #09090b;
   border-left: 1px solid #27272a;
   z-index: 100;
@@ -592,7 +593,8 @@
 
 .assistant-messages::-webkit-scrollbar-thumb {
   background: #3f3f46;
-  border-radius: 2px;
+  border: 1px solid var(--scrollbar-track);
+  border-radius: 999px;
 }
 
 .chat-message {
@@ -731,6 +733,7 @@
 }
 
 .assistant-text-input {
+  --scrollbar-track: #18181b;
   flex: 1;
   background: transparent;
   border: none;
