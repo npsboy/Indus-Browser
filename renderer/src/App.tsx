@@ -625,8 +625,13 @@ function App() {
   }
 
   const [AddressBarValue, setAddressBarValue] = useState("");
+  const addressBarFocusedRef = useRef(false);
 
   useEffect(() => {
+    if (addressBarFocusedRef.current) {
+      return;
+    }
+
     const activeTab = tabs.find(t => t.isActive);
     if (activeTab) {
       if (isNewTabUrl(activeTab.url)) {
@@ -717,7 +722,9 @@ function App() {
     );
     const activeTab = tabsRef.current.find(t => t.isActive);
     if (activeTab && activeTab.id === tabId) {
-      setAddressBarValue(isNewTabUrl(newUrl) ? "" : newUrl);
+      if (!addressBarFocusedRef.current) {
+        setAddressBarValue(isNewTabUrl(newUrl) ? "" : newUrl);
+      }
     }
   }
 
@@ -968,7 +975,13 @@ function App() {
             value={AddressBarValue} 
             onChange={(e) => setAddressBarValue(e.target.value)}
             className="address-input" 
-            onBlur={(e) => handleUserAddressBarInput(e.target.value)}
+            onFocus={() => {
+              addressBarFocusedRef.current = true;
+            }}
+            onBlur={(e) => {
+              addressBarFocusedRef.current = false;
+              handleUserAddressBarInput(e.target.value);
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 handleUserAddressBarInput(e.currentTarget.value);
