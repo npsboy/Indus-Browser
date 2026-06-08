@@ -5,6 +5,7 @@ import { readFileSync } from "fs";
 import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
 
 const dispatcherPrompt = readFileSync(path.join(__dirname, "agent/prompts/dispatcher-prompt.md"), "utf-8");
+const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
 
 async function postChat(payload: any) {
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
@@ -153,7 +154,17 @@ ipcMain.on('agent:resume', () => {
 
 ipcMain.handle('chat-request', async (_event, payload) => {
     try {
-        return await postChat(payload);
+        const requestPayload = payload?.agentRole === "conversant"
+            ? {
+                ...payload,
+                messages: [
+                    { role: "system", content: conversantPrompt },
+                    ...(Array.isArray(payload.messages) ? payload.messages : [])
+                ]
+            }
+            : payload;
+
+        return await postChat(requestPayload);
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
     }
