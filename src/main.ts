@@ -43,18 +43,12 @@ function attachShortcutHandler(contents) {
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:close-active-tab");
             break;
         case "=":
-            const webContents = BrowserWindow.getAllWindows()[0]?.webContents;
-            if (webContents) {
-                let zoomLevel = webContents.getZoomLevel();
-                webContents.setZoomLevel(zoomLevel + 0.5);
-            }
+            event.preventDefault();
+            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:zoom-in");
             break;
         case "-":
-            const wc = BrowserWindow.getAllWindows()[0]?.webContents;
-            if (wc) {
-                let zoomLevel = wc.getZoomLevel();
-                wc.setZoomLevel(zoomLevel - 0.5);
-            }
+            event.preventDefault();
+            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:zoom-out");
             break;
         case "q":
             runAgent();
@@ -167,6 +161,74 @@ ipcMain.handle('chat-request', async (_event, payload) => {
         return await postChat(requestPayload);
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
+    }
+});
+
+ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
+    const chunkChannel = `chat-stream-chunk-${requestId}`;
+    const doneChannel = `chat-stream-done-${requestId}`;
+    const sender = event.sender;
+
+    try {
+        const requestPayload = payload?.agentRole === "conversant"
+            ? {
+                ...payload,
+                messages: [
+                    { role: "system", content: conversantPrompt },
+                    ...(Array.isArray(payload.messages) ? payload.messages : [])
+                ]
+            }
+            : payload;
+
+        const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestPayload)
+        });
+
+        if (!response.ok) {
+            sender.send(doneChannel, { error: true, status: response.status, text: await response.text() });
+            return;
+        }
+
+        // Fall back to plain JSON if the backend isn't actually streaming
+        // (e.g. the streaming Worker branch isn't deployed yet).
+        const contentType = response.headers.get("content-type") || "";
+        if (!response.body || !contentType.includes("text/event-stream")) {
+            sender.send(doneChannel, { error: false, data: await response.json() });
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+
+            for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const dataStr = line.slice(6).trim();
+                if (dataStr === "[DONE]") continue;
+                try {
+                    const parsed = JSON.parse(dataStr);
+                    if (typeof parsed.delta === "string") {
+                        sender.send(chunkChannel, parsed.delta);
+                    }
+                } catch {
+                    // ignore malformed SSE payloads
+                }
+            }
+        }
+
+        sender.send(doneChannel, { error: false });
+    } catch (error: any) {
+        sender.send(doneChannel, { error: true, status: 0, text: error.message });
     }
 });
 

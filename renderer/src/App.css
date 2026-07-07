@@ -861,6 +861,13 @@
   transition: color 0.2s;
 }
 
+.assistant-mode-button .dropdown-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .assistant-mode-button:hover {
   color: #a1a1aa;
 }
@@ -997,11 +1004,11 @@
 }
 
 .markdown-content a {
-  color: #6b9df9;
+  color: var(--accent);
   text-decoration: underline;
   cursor: pointer;
 }
 
 .markdown-content a:hover {
-  color: #8bc1ff;
+  color: var(--accent-strong);
 }

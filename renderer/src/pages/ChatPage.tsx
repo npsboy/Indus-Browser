@@ -4,6 +4,19 @@ import "./ChatPage.css";
 import deleteIcon from "../assets/Icons/Delete-Red.png";
 import editIcon from "../assets/Icons/Edit-Grey.png";
 import moreIcon from "../assets/Icons/More-Grey.png";
+import logo from "../assets/logos/Logo-Orange.png";
+
+const WELCOME_QUOTES = [
+  '"The important thing is not to stop questioning." — Albert Einstein',
+  "\"I don't know what I think until I write it down.\" — Joan Didion",
+  '"The beginning is always today." — Mary Shelley',
+  '"The unexamined life is not worth living." — Socrates (as recorded by Plato)',
+  '"A problem well stated is a problem half solved." — Charles Kettering',
+];
+
+function pickWelcomeQuote() {
+  return WELCOME_QUOTES[Math.floor(Math.random() * WELCOME_QUOTES.length)];
+}
 
 type ChatMessage = {
   role: "user" | "conversant" | "system";
@@ -21,6 +34,7 @@ type ChatPageProps = {
   tabId: string;
   initialUrl: string;
   onUrlChange?: (newUrl: string) => void;
+  onTitleChange?: (title: string) => void;
 };
 
 const STORAGE_KEY = "indus-browser.chats.v1";
@@ -57,7 +71,7 @@ function useLoadingText(isLoading: boolean) {
   return `Loading${dotCount > 0 ? ` ${".".repeat(dotCount)}` : ""}`;
 }
 
-export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: ChatPageProps) {
+export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTitleChange }: ChatPageProps) {
   const urlObj = new URL(initialUrl);
   const initialQuery = urlObj.searchParams.get("q") || "";
   const existingChatId = urlObj.searchParams.get("id");
@@ -72,6 +86,8 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
   const [openMenuChatId, setOpenMenuChatId] = useState<string | null>(null);
   const [editingChatId, setEditingChatId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [welcomeQuote, setWelcomeQuote] = useState(pickWelcomeQuote);
+  const [streamingReply, setStreamingReply] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatMenuRef = useRef<HTMLDivElement>(null);
@@ -176,27 +192,37 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
     setIsLoading(true);
 
     try {
-      const payloadMessages = updatedMessages.map(m => ({ 
-        role: m.role === "conversant" ? "assistant" : m.role, 
-        content: m.content 
+      const payloadMessages = updatedMessages.map(m => ({
+        role: m.role === "conversant" ? "assistant" : m.role,
+        content: m.content
       }));
 
-      const response = await (window as any).api.chatRequest({
-        agentRole: "conversant",
-        messages: payloadMessages
-      });
-      if (!response.error) {
-        const data = response.data;
-        const replyText = typeof data.reply === "string" ? data.reply : JSON.stringify(data.reply);
-        setMessages(prev => [...prev, { role: "conversant", content: replyText }]);
+      let accumulated = "";
+      const result = await (window as any).api.chatStreamRequest(
+        { agentRole: "conversant", messages: payloadMessages },
+        (delta: string) => {
+          accumulated += delta;
+          setIsLoading(false);
+          setStreamingReply(accumulated);
+        }
+      );
+
+      if (!result.error) {
+        if (accumulated) {
+          setMessages(prev => [...prev, { role: "conversant", content: accumulated }]);
+        } else if (result.data) {
+          const replyText = typeof result.data.reply === "string" ? result.data.reply : JSON.stringify(result.data.reply);
+          setMessages(prev => [...prev, { role: "conversant", content: replyText }]);
+        }
       } else {
-        console.error("Server error:", response.status, response.text);
-        setMessages(prev => [...prev, { role: "system", content: `Error ${response.status}: ${response.text}` }]);
+        console.error("Server error:", result.status, result.text);
+        setMessages(prev => [...prev, { role: "system", content: `Error ${result.status}: ${result.text}` }]);
       }
     } catch (e) {
       console.error("Chat error", e);
       setMessages(prev => [...prev, { role: "system", content: `Network Error: ${String(e)}` }]);
     } finally {
+      setStreamingReply(null);
       setIsLoading(false);
     }
   };
@@ -214,6 +240,7 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
     setIsSidebarOpen(false);
     setOpenMenuChatId(null);
     setEditingChatId(null);
+    setWelcomeQuote(pickWelcomeQuote());
   };
 
   const renameChat = (chat: ChatSession) => {
@@ -278,6 +305,33 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
   };
 
   const currentChatTitle = chats.find(c => c.id === currentChatId)?.title || "New Chat";
+  const isEmptyChat = messages.length === 0 && !isLoading;
+
+  // Keep the browser tab's title in sync with the chat title
+  useEffect(() => {
+    onTitleChange?.(currentChatTitle);
+  }, [currentChatTitle, onTitleChange]);
+
+  const chatInputBox = (
+    <div className="chat-input-wrapper">
+      <textarea
+        ref={textareaRef}
+        placeholder="Write a message..."
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onKeyDown={handleKeyDown}
+        style={{
+          minHeight: '44px',
+          padding: '12px 16px',
+          fontSize: '15px',
+          resize: 'none',
+          overflowY: 'hidden'
+        }}
+        rows={1}
+      />
+      <button className="chat-send-btn" onClick={() => handleSend(input)}>↑</button>
+    </div>
+  );
 
   return (
     <div className="chat-page-container">
@@ -343,44 +397,49 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange }: Cha
       <div className="chat-main">
         <div className="chat-header">
           <div className="chat-title-dropdown" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
-            {currentChatTitle} <span className="dropdown-icon">⌄</span>
+            <span className="chat-title-text">{currentChatTitle}</span>
+            <span className="dropdown-icon" aria-hidden="true">
+              <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
           </div>
         </div>
         
-        <div className="chat-messages-container">
-          <div className="chat-messages-pad">
-            {messages.map((msg, i) => (
-              <div key={i} className={`chat-msg-row ${msg.role}`}>
-                <div className={`chat-bubble-inner ${msg.role}`}>
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
-                </div>
+        {isEmptyChat ? (
+          <div className="chat-empty-state">
+            <img src={logo} alt="" className="chat-empty-logo" />
+            <p className="chat-empty-quote">{welcomeQuote}</p>
+            {chatInputBox}
+          </div>
+        ) : (
+          <>
+            <div className="chat-messages-container">
+              <div className="chat-messages-pad">
+                {messages.map((msg, i) => (
+                  <div key={i} className={`chat-msg-row ${msg.role}`}>
+                    <div className={`chat-bubble-inner ${msg.role}`}>
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    </div>
+                  </div>
+                ))}
+                {streamingReply !== null && (
+                  <div className="chat-msg-row conversant">
+                    <div className="chat-bubble-inner conversant">
+                      <ReactMarkdown>{streamingReply}</ReactMarkdown>
+                    </div>
+                  </div>
+                )}
+                {isLoading && streamingReply === null && <div className="chat-msg-row conversant"><div className="chat-bubble-inner conversant">{loadingText}</div></div>}
+                <div ref={messagesEndRef} />
               </div>
-            ))}
-            {isLoading && <div className="chat-msg-row conversant"><div className="chat-bubble-inner conversant">{loadingText}</div></div>}
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
-        
-        <div className="chat-input-area">
-          <div className="chat-input-wrapper">
-            <textarea
-              ref={textareaRef}
-              placeholder="Write a message..."
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              style={{
-                minHeight: '44px',
-                padding: '12px 16px',
-                fontSize: '15px',
-                resize: 'none',
-                overflowY: 'hidden'
-              }}
-              rows={1}
-            />
-            <button className="chat-send-btn" onClick={() => handleSend(input)}>↑</button>
-          </div>
-        </div>
+            </div>
+
+            <div className="chat-input-area">
+              {chatInputBox}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

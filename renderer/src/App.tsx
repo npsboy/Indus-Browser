@@ -29,13 +29,14 @@ type ApiResponse = {
   text?: string;
 };
 
-function getFaviconUrl(pageUrl: string) {
+function isInternalUrl(url: string) {
+  return isNewTabUrl(url) || isChatUrl(url);
+}
+
+function guessFaviconUrl(pageUrl: string): string | null {
   try {
-    if (isNewTabUrl(pageUrl) || isChatUrl(pageUrl)) {
-      return null;
-    }
     const u = new URL(pageUrl);
-    return u.origin + "/favicon.ico";
+    return `https://www.google.com/s2/favicons?sz=64&domain=${u.hostname}`;
   } catch {
     return null;
   }
@@ -103,8 +104,10 @@ function normalizeTabs(tabs: unknown): Tab[] {
         url,
         title: typeof tab?.title === "string" ? tab.title : undefined,
         isActive: Boolean(tab?.isActive),
-        faviconUrl: typeof tab?.faviconUrl === "string" || tab?.faviconUrl === null ? tab.faviconUrl : null,
-        isLoading: Boolean(tab?.isLoading),
+        faviconUrl: isInternalUrl(url)
+          ? null
+          : (typeof tab?.faviconUrl === "string" || tab?.faviconUrl === null ? tab.faviconUrl : null),
+        isLoading: isInternalUrl(url) ? false : Boolean(tab?.isLoading),
         history: resolvedHistory,
         historyIndex: resolvedHistoryIndex,
       } as Tab;
@@ -216,15 +219,15 @@ function App() {
   }
 
   function addTab(newUrl: string) {
-    const isNewTab = isNewTabUrl(newUrl);
+    const isLoadableUrl = !isInternalUrl(newUrl);
     setTabs((currentTabs) => {
       const newTab: Tab = {
         id: crypto.randomUUID(),
         url: newUrl,
         title: "New Tab",
         isActive: true,
-        faviconUrl: null,
-        isLoading: !isNewTab,
+        faviconUrl: isLoadableUrl ? guessFaviconUrl(newUrl) : null,
+        isLoading: isLoadableUrl,
         history: [newUrl],
         historyIndex: 0,
       };
@@ -305,6 +308,7 @@ function App() {
       finishLoad: () => void;
       startLoading: () => void;
       titleUpdated: (e: any) => void;
+      faviconUpdated: (e: any) => void;
       contextMenu: (e: any) => void;
       newWindow: (e: any) => void;
     }>();
@@ -348,6 +352,16 @@ function App() {
           setTabs((currentTabs) =>
             currentTabs.map((t) =>
               t.id === tab.id ? { ...t, title: e.title || "Untitled" } : t
+            )
+          );
+        };
+
+        const faviconUpdatedHandler = (e: any) => {
+          const favicons: string[] = Array.isArray(e?.favicons) ? e.favicons : [];
+          if (favicons.length === 0) return;
+          setTabs((currentTabs) =>
+            currentTabs.map((t) =>
+              t.id === tab.id ? { ...t, faviconUrl: favicons[0] } : t
             )
           );
         };
@@ -450,6 +464,7 @@ function App() {
         el.addEventListener('did-navigate-in-page', navigateInPageHandler);
         el.addEventListener('did-finish-load', finishLoadHandler);
         el.addEventListener('page-title-updated', titleUpdatedHandler);
+        el.addEventListener('page-favicon-updated', faviconUpdatedHandler);
         el.addEventListener('context-menu', contextMenuHandler);
         el.addEventListener('new-window', newWindowHandler);
 
@@ -459,6 +474,7 @@ function App() {
           navigateInPage: navigateInPageHandler,
           finishLoad: finishLoadHandler,
           titleUpdated: titleUpdatedHandler,
+          faviconUpdated: faviconUpdatedHandler,
           contextMenu: contextMenuHandler,
           newWindow: newWindowHandler
         });
@@ -475,6 +491,7 @@ function App() {
           el.removeEventListener('did-navigate-in-page', h.navigateInPage);
           el.removeEventListener('did-finish-load', h.finishLoad);
           el.removeEventListener('page-title-updated', h.titleUpdated);
+          el.removeEventListener('page-favicon-updated', h.faviconUpdated);
           el.removeEventListener('context-menu', h.contextMenu);
           el.removeEventListener('new-window', h.newWindow);
         }
@@ -675,15 +692,42 @@ function App() {
     }
   }, []);
 
+  function getActiveWebview(): any {
+    const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (!activeTab) return null;
+    return webviewRefs.current.get(activeTab.id) ?? null;
+  }
+
   function handleReloadActiveTab() {
-    const activeWebview = document.querySelector('webview[style*="display: flex"]') as any;
+    const activeWebview = getActiveWebview();
     if (activeWebview) {
       activeWebview.reload();
     }
   }
 
   useEffect(() => {
-    (window as any).api?.onReloadActiveTab(handleReloadActiveTab);
+    const cleanup = (window as any).api?.onReloadActiveTab(handleReloadActiveTab);
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = (window as any).api?.onZoomIn(() => {
+      const activeWebview = getActiveWebview();
+      if (activeWebview) {
+        activeWebview.setZoomLevel(activeWebview.getZoomLevel() + 0.5);
+      }
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = (window as any).api?.onZoomOut(() => {
+      const activeWebview = getActiveWebview();
+      if (activeWebview) {
+        activeWebview.setZoomLevel(activeWebview.getZoomLevel() - 0.5);
+      }
+    });
+    return () => cleanup?.();
   }, []);
 
   function handleMinimize() {
@@ -733,6 +777,13 @@ function App() {
     if (!(url.startsWith("http://") || url.startsWith("https://"))) {
       url = "https://www.google.com/search?q=" + encodeURIComponent(url);
     }
+
+    const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (activeTab && activeTab.url === url) {
+      handleReloadActiveTab();
+      return;
+    }
+
     navigateActiveTabToUrl(url);
   }
 
@@ -755,8 +806,8 @@ function App() {
               return {
                 ...tab,
                 url,
-                isLoading: !isNewTab,
-                faviconUrl: isNewTab ? null : getFaviconUrl(url),
+                isLoading: !isInternalUrl(url),
+                faviconUrl: isInternalUrl(url) ? null : guessFaviconUrl(url),
                 history: nextHistory,
                 historyIndex: nextHistory.length - 1,
               };
@@ -793,6 +844,20 @@ function App() {
     }
   }
 
+  function setTabTitle(tabId: string, title: string) {
+    const nextTitle = title.trim();
+    if (!nextTitle) return;
+    setTabs((currentTabs) => {
+      const target = currentTabs.find((tab) => tab.id === tabId);
+      if (!target || target.title === nextTitle) {
+        return currentTabs;
+      }
+      return currentTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, title: nextTitle } : tab
+      );
+    });
+  }
+
   function updateTabUrl(tabId: string, newUrl: string) {
     setTabs((currentTabs) =>
       currentTabs.map((tab) =>
@@ -806,7 +871,7 @@ function App() {
                 return {
                   ...tab,
                   url: newUrl,
-                  faviconUrl: isNewTabUrl(newUrl) ? null : getFaviconUrl(newUrl),
+                  faviconUrl: currentHistoryUrl === tab.url ? tab.faviconUrl ?? null : null,
                 };
               }
 
@@ -816,7 +881,7 @@ function App() {
               return {
                 ...tab,
                 url: newUrl,
-                faviconUrl: isNewTabUrl(newUrl) ? null : getFaviconUrl(newUrl),
+                faviconUrl: isInternalUrl(newUrl) ? null : guessFaviconUrl(newUrl),
                 history: nextHistory,
                 historyIndex: nextHistory.length - 1,
               };
@@ -857,8 +922,8 @@ function App() {
               ...tab,
               url: targetUrl,
               historyIndex: targetIndex,
-              isLoading: true,
-              faviconUrl: isNewTabUrl(targetUrl) ? null : getFaviconUrl(targetUrl),
+              isLoading: !isInternalUrl(targetUrl),
+              faviconUrl: isInternalUrl(targetUrl) ? null : guessFaviconUrl(targetUrl),
             }
           : tab
       )
@@ -879,8 +944,8 @@ function App() {
               ...tab,
               url: targetUrl,
               historyIndex: targetIndex,
-              isLoading: true,
-              faviconUrl: isNewTabUrl(targetUrl) ? null : getFaviconUrl(targetUrl),
+              isLoading: !isInternalUrl(targetUrl),
+              faviconUrl: isInternalUrl(targetUrl) ? null : guessFaviconUrl(targetUrl),
             }
           : tab
       )
@@ -1002,11 +1067,13 @@ function App() {
             className={`tab ${tab.isActive ? "active" : ""}`}
             style={{ width: `${tabWidth}px` }}
             >
-            {tab.isLoading ? (
+            {isInternalUrl(tab.url) ? (
+              <img src={logo} alt="" className="tab-favicon" />
+            ) : tab.isLoading && !tab.faviconUrl ? (
               <img src={loadingAnimation} className="loading-animation" />
             ) : (
               <img
-              src={tab.faviconUrl ? tab.faviconUrl : (isNewTabUrl(tab.url) ? logo : favicon)}
+              src={tab.faviconUrl ? tab.faviconUrl : favicon}
               alt=""
               className="tab-favicon"
               onError={(e) => {
@@ -1125,7 +1192,7 @@ function App() {
                 className="chat-page-shell"
                 style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
               >
-                <ChatPage tabId={tab.id} initialUrl={tab.url} onUrlChange={(newUrl) => updateTabUrl(tab.id, newUrl)} />
+                <ChatPage tabId={tab.id} initialUrl={tab.url} onUrlChange={(newUrl) => updateTabUrl(tab.id, newUrl)} onTitleChange={(title) => setTabTitle(tab.id, title)} />
               </div>
             );
           } else {
@@ -1270,7 +1337,12 @@ function App() {
                     className="assistant-mode-button" 
                     onClick={() => setShowAssistantMenu(!showAssistantMenu)}
                   >
-                    {assistantMode === 'agent' ? 'Agent' : 'Chat'} <span>⌄</span>
+                    {assistantMode === 'agent' ? 'Agent' : 'Chat'}
+                    <span className="dropdown-icon" aria-hidden="true">
+                      <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                        <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
                   </button>
                   
                   {showAssistantMenu && (

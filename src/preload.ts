@@ -19,6 +19,17 @@ function closeWindow() {
 
 function onReloadActiveTab(callback: () => void) {
   ipcRenderer.on("browser:reload-active-tab", callback);
+  return () => ipcRenderer.removeListener("browser:reload-active-tab", callback);
+}
+
+function onZoomIn(callback: () => void) {
+  ipcRenderer.on("browser:zoom-in", callback);
+  return () => ipcRenderer.removeListener("browser:zoom-in", callback);
+}
+
+function onZoomOut(callback: () => void) {
+  ipcRenderer.on("browser:zoom-out", callback);
+  return () => ipcRenderer.removeListener("browser:zoom-out", callback);
 }
 
 function onNewTab(callback: () => void) {
@@ -101,6 +112,25 @@ function chatRequest(payload: any): Promise<any> {
     return ipcRenderer.invoke('chat-request', payload);
 }
 
+function chatStreamRequest(payload: any, onChunk: (delta: string) => void): Promise<any> {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const chunkChannel = `chat-stream-chunk-${requestId}`;
+    const doneChannel = `chat-stream-done-${requestId}`;
+
+    return new Promise((resolve) => {
+        const onChunkEvent = (_event: any, delta: string) => onChunk(delta);
+        const onDoneEvent = (_event: any, result: any) => {
+            ipcRenderer.removeListener(chunkChannel, onChunkEvent);
+            ipcRenderer.removeListener(doneChannel, onDoneEvent);
+            resolve(result);
+        };
+
+        ipcRenderer.on(chunkChannel, onChunkEvent);
+        ipcRenderer.on(doneChannel, onDoneEvent);
+        ipcRenderer.send('chat-request-stream', { requestId, payload });
+    });
+}
+
 function dispatcherRequest(text: string): Promise<any> {
     return ipcRenderer.invoke('dispatcher-request', text);
 }
@@ -111,6 +141,8 @@ contextBridge.exposeInMainWorld('api', {
     maximizeWindow,
     closeWindow,
     onReloadActiveTab,
+    onZoomIn,
+    onZoomOut,
     onNewTab,
     onCloseActiveTab,
     onAgentNavigate,
@@ -128,5 +160,6 @@ contextBridge.exposeInMainWorld('api', {
     onAgentWarn,
     onOpenUrlInNewTab,
     chatRequest,
+    chatStreamRequest,
     dispatcherRequest
 });

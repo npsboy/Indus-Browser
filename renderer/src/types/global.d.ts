@@ -12,6 +12,8 @@ declare global {
       resumeAgent: () => void;
       onAgentDone: (callback: (_event: any, answer: string) => void) => (() => void);
       onAgentWarn: (callback: (_event: any, message: string) => void) => (() => void);
+      chatRequest: (payload: any) => Promise<any>;
+      chatStreamRequest: (payload: any, onChunk: (delta: string) => void) => Promise<any>;
     };
   }
 }

@@ -214,6 +214,44 @@
   color: #fff;
 }
 
+.chat-title-dropdown .dropdown-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.chat-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 24px;
+}
+
+.chat-empty-logo {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  opacity: 0.9;
+}
+
+.chat-empty-quote {
+  max-width: 480px;
+  margin: -12px 0 0;
+  text-align: center;
+  color: #a9a29a;
+  font-style: italic;
+  font-size: 20px;
+  line-height: 1.5;
+}
+
+.chat-empty-state .chat-input-wrapper {
+  width: min(700px, 90vw);
+}
+
 .chat-messages-container {
   flex: 1;
   overflow-y: auto;

@@ -61,3 +61,12 @@ input,
 textarea {
   font-family: inherit;
 }
+
+a {
+  color: var(--accent, #d88c3e);
+  text-decoration: underline;
+}
+
+a:hover {
+  color: var(--accent-strong, #e39a49);
+}
