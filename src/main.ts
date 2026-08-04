@@ -66,12 +66,17 @@ function createWindow() {
         width: 1200,
         height: 800,
         titleBarStyle: "hidden",
+        icon: path.join(__dirname, "../renderer/src/assets/logos/Favicon.png"),
 
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             contextIsolation: true,
             nodeIntegration: false,
-            webviewTag: true
+            webviewTag: true,
+            // Without this, Chromium throttles timers for occluded/minimized
+            // windows, which can starve the Vite HMR websocket's heartbeat and
+            // trigger a full page reload once the window regains focus.
+            backgroundThrottling: false
 
         }
     });
