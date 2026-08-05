@@ -4,6 +4,8 @@ import { ipcMain } from "electron";
 import { readFileSync } from "fs";
 import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
 
+const APP_URL = "http://localhost:5173";
+
 const dispatcherPrompt = readFileSync(path.join(__dirname, "agent/prompts/dispatcher-prompt.md"), "utf-8");
 const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
 
@@ -88,8 +90,23 @@ function createWindow() {
     win.removeMenu();
 
 
-    win.loadURL("http://localhost:5173");
-  
+    win.loadURL(APP_URL);
+
+    // The app shell itself must never navigate away from its own UI — a plain
+    // <a href> rendered in the renderer (e.g. a link in an agent chat reply)
+    // would otherwise navigate win.webContents in place and wipe out the
+    // entire toolbar/tab UI. Redirect any such navigation into a new tab.
+    win.webContents.on("will-navigate", (event, url) => {
+        if (url === APP_URL || url.startsWith(`${APP_URL}/`)) return;
+        event.preventDefault();
+        win.webContents.send("browser:open-url-in-new-tab", url);
+    });
+
+    win.webContents.setWindowOpenHandler((details) => {
+        win.webContents.send("browser:open-url-in-new-tab", details.url);
+        return { action: "deny" };
+    });
+
     app.on("web-contents-created", function (_event, contents) {
         // Skip the main window's webContents — already handled above
         if (contents === win.webContents) return;
@@ -102,7 +119,7 @@ function createWindow() {
             return { action: "deny" };
         });
     });
-    
+
 }
 
 
