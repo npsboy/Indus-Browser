@@ -8,6 +8,9 @@ import deleteIcon from "../assets/Icons/Delete-Red.png";
 import editIcon from "../assets/Icons/Edit-Grey.png";
 import moreIcon from "../assets/Icons/More-Grey.png";
 import logo from "../assets/logos/Logo-Orange.png";
+import { useLoadingText } from "../hooks/useLoadingText";
+import { useImageAttachment } from "../hooks/useImageAttachment";
+import { useTaskSuggestion } from "../hooks/useTaskSuggestion";
 
 const WELCOME_QUOTES = [
   '"The important thing is not to stop questioning." — Albert Einstein',
@@ -52,6 +55,7 @@ const MARKDOWN_COMPONENTS = { pre: MarkdownCodeBlock };
 type ChatMessage = {
   role: "user" | "conversant" | "system";
   content: string;
+  imageUrl?: string;
 };
 
 type ChatSession = {
@@ -73,6 +77,8 @@ type ChatPageProps = {
   initialUrl: string;
   onUrlChange?: (newUrl: string) => void;
   onTitleChange?: (title: string) => void;
+  onExitToNewTab?: () => void;
+  onStartAgentTask?: (taskText: string, history: { role: 'user' | 'assistant'; content: string }[]) => void;
 };
 
 const STORAGE_KEY = "indus-browser.chats.v1";
@@ -117,26 +123,7 @@ function snippetFor(chat: ChatSession): string {
   return last.content.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
-function useLoadingText(isLoading: boolean) {
-  const [dotCount, setDotCount] = useState(0);
-
-  useEffect(() => {
-    if (!isLoading) {
-      setDotCount(0);
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      setDotCount((current) => (current + 1) % 4);
-    }, 400);
-
-    return () => window.clearInterval(intervalId);
-  }, [isLoading]);
-
-  return `Loading${dotCount > 0 ? ` ${".".repeat(dotCount)}` : ""}`;
-}
-
-export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTitleChange }: ChatPageProps) {
+export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTitleChange, onExitToNewTab, onStartAgentTask }: ChatPageProps) {
   const urlObj = new URL(initialUrl);
   const initialQuery = urlObj.searchParams.get("q") || "";
   const existingChatId = urlObj.searchParams.get("id");
@@ -170,6 +157,9 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
   const [welcomeQuote, setWelcomeQuote] = useState(pickWelcomeQuote);
   const [streamingReply, setStreamingReply] = useState<string | null>(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const imageAttachment = useImageAttachment();
+  const taskSuggestion = useTaskSuggestion();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatSearchInputRef = useRef<HTMLInputElement>(null);
@@ -299,7 +289,7 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
     }
   }, [messages]);
 
-  const requestReply = async (payloadHistory: ChatMessage[]) => {
+  const requestReply = async (payloadHistory: ChatMessage[], imageUrl?: string) => {
     setIsLoading(true);
 
     try {
@@ -309,8 +299,8 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
       }));
 
       let accumulated = "";
-      const result = await (window as any).api.chatStreamRequest(
-        { agentRole: "conversant", messages: payloadMessages },
+      const result = await window.api!.chatStreamRequest(
+        { agentRole: "conversant", messages: payloadMessages, ...(imageUrl ? { imageUrl } : {}) },
         (delta: string) => {
           accumulated += delta;
           setIsLoading(false);
@@ -341,11 +331,24 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
   const handleSend = async (text: string) => {
     if (!text.trim()) return;
 
-    const newMsg: ChatMessage = { role: "user", content: text };
+    const attachedImage = imageAttachment.pendingImage;
+    const newMsg: ChatMessage = { role: "user", content: text, imageUrl: attachedImage?.dataUrl };
     const updatedMessages = [...messages, newMsg];
     setMessages(updatedMessages);
     setInput("");
-    await requestReply(updatedMessages);
+    imageAttachment.clear();
+    taskSuggestion.clear();
+    await requestReply(updatedMessages, attachedImage?.dataUrl);
+    taskSuggestion.suggest(text);
+  };
+
+  const handleSwitchToAgent = (taskText: string) => {
+    taskSuggestion.clear();
+    setMessages(prev => [...prev, { role: "system", content: "Agent is now running in the sidebar." }]);
+    const history = messages
+      .filter(m => m.role === "user" || m.role === "conversant")
+      .map(m => ({ role: (m.role === "conversant" ? "assistant" : "user") as 'user' | 'assistant', content: m.content }));
+    onStartAgentTask?.(taskText, history);
   };
 
   const regenerateLastReply = () => {
@@ -367,6 +370,8 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
       }, 1500);
     } catch (e) {
       console.error("Copy failed", e);
+      setCopyError("Couldn't copy to clipboard.");
+      window.setTimeout(() => setCopyError(null), 2500);
     }
   };
 
@@ -713,30 +718,64 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
   );
 
   const chatInputBox = (
-    <div className="chat-input-wrapper">
-      <textarea
-        ref={textareaRef}
-        placeholder="Write a message..."
-        value={input}
-        onChange={e => setInput(e.target.value)}
-        onKeyDown={handleKeyDown}
-        style={{
-          minHeight: '44px',
-          padding: '12px 16px',
-          fontSize: '15px',
-          resize: 'none',
-          overflowY: 'hidden'
-        }}
-        rows={1}
-      />
-      <button className="chat-send-btn" onClick={() => handleSend(input)} aria-label="Send message">
-        <span className="material-symbols-outlined">arrow_upward</span>
-      </button>
+    <div className="chat-input-stack">
+      {imageAttachment.pendingImage && (
+        <div className="pending-attachment-chip">
+          <img
+            src={imageAttachment.pendingImage.dataUrl}
+            alt={imageAttachment.pendingImage.name}
+            className="pending-attachment-thumb"
+          />
+          <span className="pending-attachment-name">{imageAttachment.pendingImage.name}</span>
+          <button
+            type="button"
+            className="pending-attachment-remove"
+            onClick={imageAttachment.clear}
+            aria-label="Remove attachment"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {imageAttachment.error && <div className="pending-attachment-error">{imageAttachment.error}</div>}
+      <div className="chat-input-wrapper">
+        <input {...imageAttachment.fileInputProps} />
+        <button
+          type="button"
+          className="chat-attach-btn"
+          aria-label="Attach image"
+          title="Attach image"
+          onClick={imageAttachment.pick}
+        >
+          <span className="material-symbols-outlined">attach_file</span>
+        </button>
+        <textarea
+          ref={textareaRef}
+          placeholder="Write a message..."
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={imageAttachment.handlePaste}
+          onDrop={imageAttachment.handleDrop}
+          style={{
+            minHeight: '44px',
+            padding: '12px 16px',
+            fontSize: '15px',
+            resize: 'none',
+            overflowY: 'hidden'
+          }}
+          rows={1}
+        />
+        <button className="chat-send-btn" onClick={() => handleSend(input)} aria-label="Send message">
+          <span className="material-symbols-outlined">arrow_upward</span>
+        </button>
+      </div>
     </div>
   );
 
   return (
     <div className="chat-page-container">
+      {copyError && <div className="chat-toast chat-toast-error">{copyError}</div>}
       {isSidebarOpen && (
         <div className="chat-sidebar">
           <div className="chat-sidebar-top">
@@ -745,6 +784,17 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
               <span>Indus</span>
             </div>
             <div className="chat-sidebar-top-actions">
+              {onExitToNewTab && (
+                <button
+                  type="button"
+                  className="chat-icon-btn"
+                  aria-label="Back to browsing"
+                  title="Back to browsing"
+                  onClick={onExitToNewTab}
+                >
+                  <span className="material-symbols-outlined">public</span>
+                </button>
+              )}
               <button
                 type="button"
                 className="chat-icon-btn"
@@ -1082,6 +1132,9 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
                   return (
                     <div key={i} className={`chat-msg-row ${msg.role}`}>
                       <div className={`chat-bubble-inner ${msg.role}`}>
+                        {msg.imageUrl && (
+                          <img src={msg.imageUrl} alt="attachment" className="chat-msg-attached-image" />
+                        )}
                         <ReactMarkdown
                           remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                           rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
@@ -1131,6 +1184,18 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
                   </div>
                 )}
                 {isLoading && streamingReply === null && <div className="chat-msg-row conversant"><div className="chat-bubble-inner conversant">{loadingText}</div></div>}
+                {taskSuggestion.pendingTaskSuggestion && (
+                  <div className="task-suggestion-banner">
+                    <span>This looks like a task.</span>
+                    <button
+                      type="button"
+                      className="task-suggestion-button"
+                      onClick={() => handleSwitchToAgent(taskSuggestion.pendingTaskSuggestion!)}
+                    >
+                      Switch to Agent
+                    </button>
+                  </div>
+                )}
                 <div ref={messagesEndRef} />
               </div>
             </div>

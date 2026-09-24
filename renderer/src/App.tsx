@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import "./App.css";
 import logo from "./assets/logos/Logo-Orange.png";
@@ -13,11 +13,18 @@ import pauseIcon from "./assets/Icons/Pause-White.png";
 import playIcon from "./assets/Icons/Play-White.png";
 import NewTabPage from "./pages/NewTabPage";
 import ChatPage from "./pages/ChatPage";
+import { useLoadingText } from "./hooks/useLoadingText";
+import { useImageAttachment } from "./hooks/useImageAttachment";
+import { useTaskSuggestion } from "./hooks/useTaskSuggestion";
+import HistoryPage, { type HistoryEntry } from "./pages/HistoryPage";
 
 const NEW_TAB_URL = "indus://newtab";
 const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
+const HISTORY_STORAGE_KEY = "indus-browser.history.v1";
+const SIDEBAR_SESSIONS_STORAGE_KEY = "indus-browser.sidebar-sessions.v1";
 const isNewTabUrl = (url: string) => url === NEW_TAB_URL;
 const isChatUrl = (url: string) => url.startsWith("indus://chat");
+const isHistoryUrl = (url: string) => url === "indus://history";
 type DispatcherRoute = {
   routing: "web-search" | "ai-chat";
   chatTitle?: string;
@@ -30,7 +37,16 @@ type ApiResponse = {
 };
 
 function isInternalUrl(url: string) {
-  return isNewTabUrl(url) || isChatUrl(url);
+  return isNewTabUrl(url) || isChatUrl(url) || isHistoryUrl(url);
+}
+
+function loadHistory(): HistoryEntry[] {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
 }
 
 function guessFaviconUrl(pageUrl: string): string | null {
@@ -245,18 +261,46 @@ function App() {
       addTab(NEW_TAB_URL);
     };
 
-    const cleanup = (window as any).api?.onNewTab(handler);
+    const cleanup = window.api?.onNewTab(handler);
     return cleanup;
   }, []);
 
 
   function closeTab(targetId: string) {
+    pinchScaleRef.current.delete(targetId);
     setTabs((currentTabs) => {
+      const closed = currentTabs.find(tab => tab.id === targetId);
+      if (closed) {
+        closedTabsRef.current = [closed, ...closedTabsRef.current].slice(0, 10);
+      }
       const newTabs = currentTabs.filter(tab => tab.id !== targetId);
       if (newTabs.length > 0) {
         newTabs[newTabs.length - 1].isActive = true;
       }
       return newTabs;
+    });
+  }
+
+  function reopenClosedTab() {
+    const [lastClosed, ...rest] = closedTabsRef.current;
+    if (!lastClosed) return;
+    closedTabsRef.current = rest;
+    setTabs((currentTabs) => [
+      ...currentTabs.map(t => ({ ...t, isActive: false })),
+      { ...lastClosed, isActive: true },
+    ]);
+  }
+
+  useEffect(() => {
+    const cleanup = window.api?.onReopenClosedTab(reopenClosedTab);
+    return () => cleanup?.();
+  }, []);
+
+  function recordHistoryVisit(url: string) {
+    if (isInternalUrl(url)) return;
+    setHistory((prev) => {
+      if (prev[0]?.url === url) return prev;
+      return [{ url, title: url, visitedAt: Date.now() }, ...prev].slice(0, 500);
     });
   }
 
@@ -268,7 +312,7 @@ function App() {
       }
     };
 
-    const cleanup = (window as any).api?.onCloseActiveTab(handler);
+    const cleanup = window.api?.onCloseActiveTab(handler);
     return cleanup;
   }, []);
 
@@ -297,11 +341,82 @@ function App() {
   const webviewContainerRef = useRef<HTMLDivElement>(null);
   //maps tab id to webview element inside .current
 
+  // Per-tab CSS scale applied by pinch-to-zoom (see onPinchZoom effect below).
+  const pinchScaleRef = useRef<Map<string, number>>(new Map());
+
   const closeContextMenuRef = useRef<(() => void) | null>(null);
+
+  function showContextMenu(x: number, y: number, items: { label: string; action: () => void; separator?: boolean }[]) {
+    if (closeContextMenuRef.current) {
+      closeContextMenuRef.current();
+    }
+
+    const overlay = document.createElement('div');
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100vw';
+    overlay.style.height = '100vh';
+    overlay.style.zIndex = '9999';
+    overlay.style.background = 'transparent';
+
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    menu.style.zIndex = '10000';
+
+    const removeMenu = () => {
+      if (document.body.contains(overlay)) {
+        document.body.removeChild(overlay);
+      }
+      if (document.body.contains(menu)) {
+        document.body.removeChild(menu);
+      }
+      closeContextMenuRef.current = null;
+    };
+
+    closeContextMenuRef.current = removeMenu;
+
+    overlay.addEventListener('mousedown', () => {
+      removeMenu();
+    });
+
+    overlay.addEventListener('contextmenu', (evt) => {
+      evt.preventDefault();
+      removeMenu();
+    });
+
+    items.forEach((item) => {
+      const menuItem = document.createElement('div');
+      menuItem.textContent = item.label;
+      menuItem.className = `context-menu-item${item.separator ? ' separator' : ''}`;
+
+      menuItem.addEventListener('click', (clickEvent) => {
+        clickEvent.stopPropagation();
+        item.action();
+        removeMenu();
+      });
+
+      menu.appendChild(menuItem);
+    });
+
+    document.body.appendChild(overlay);
+    document.body.appendChild(menu);
+  }
+
+  function handleTabContextMenu(e: ReactMouseEvent, tab: Tab) {
+    e.preventDefault();
+    e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Duplicate tab', action: () => addTab(tab.url) },
+      { label: 'Close tab', action: () => closeTab(tab.id) },
+    ]);
+  }
 
   useEffect(() => {
     const currentRefs = webviewRefs.current;
-    
+
     const handlers = new Map<string, { 
       navigate: (e: any) => void; 
       navigateInPage: (e: any) => void; 
@@ -335,6 +450,7 @@ function App() {
 
         const navigateHandler = (e: any) => {
           updateTabUrl(tab.id, e.url);
+          recordHistoryVisit(e.url);
         };
         const navigateInPageHandler = (e: any) => {
           updateTabUrl(tab.id, e.url);
@@ -354,6 +470,12 @@ function App() {
               t.id === tab.id ? { ...t, title: e.title || "Untitled" } : t
             )
           );
+          if (e.title) {
+            setHistory((prev) => {
+              if (prev.length === 0 || prev[0].url !== tab.url || prev[0].title === e.title) return prev;
+              return [{ ...prev[0], title: e.title }, ...prev.slice(1)];
+            });
+          }
         };
 
         const faviconUpdatedHandler = (e: any) => {
@@ -368,53 +490,8 @@ function App() {
 
         const contextMenuHandler = (e: any) => {
           e.preventDefault();
-          
-          // Remove any existing menu first
-          if (closeContextMenuRef.current) {
-            closeContextMenuRef.current();
-          }
 
           const { x, y, linkURL } = e.params;
-
-          // Create overlay to catch clicks outside
-          const overlay = document.createElement('div');
-          overlay.style.position = 'fixed';
-          overlay.style.top = '0';
-          overlay.style.left = '0';
-          overlay.style.width = '100vw';
-          overlay.style.height = '100vh';
-          overlay.style.zIndex = '9999';
-          overlay.style.background = 'transparent';
-
-          const menu = document.createElement('div');
-          menu.className = 'context-menu';
-          menu.style.left = `${x}px`;
-          menu.style.top = `${y}px`;
-          menu.style.zIndex = '10000';
-
-          const removeMenu = () => {
-            if (document.body.contains(overlay)) {
-              document.body.removeChild(overlay);
-            }
-            if (document.body.contains(menu)) {
-              document.body.removeChild(menu);
-            }
-            closeContextMenuRef.current = null;
-          };
-
-          closeContextMenuRef.current = removeMenu;
-
-          // Close on click outside (clicking the overlay)
-          overlay.addEventListener('mousedown', () => {
-            removeMenu();
-          });
-          
-          // Prevent default context menu on overlay and close custom menu
-          overlay.addEventListener('contextmenu', (evt) => {
-             evt.preventDefault();
-             removeMenu();
-          });
-
           const menuItems: { label: string; action: () => void; separator?: boolean }[] = [];
 
           if (linkURL) {
@@ -441,22 +518,7 @@ function App() {
             }
           });
 
-          menuItems.forEach((item) => {
-            const menuItem = document.createElement('div');
-            menuItem.textContent = item.label;
-            menuItem.className = `context-menu-item${item.separator ? ' separator' : ''}`;
-
-            menuItem.addEventListener('click', (clickEvent) => {
-              clickEvent.stopPropagation();
-              item.action();
-              removeMenu();
-            });
-
-            menu.appendChild(menuItem);
-          });
-
-          document.body.appendChild(overlay);
-          document.body.appendChild(menu);
+          showContextMenu(x, y, menuItems);
         };
 
         el.addEventListener('did-start-loading', startLoadingHandler);
@@ -517,18 +579,130 @@ function App() {
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [showMouseCoords]);
-  type ChatMessage = { role: 'user' | 'agent' | 'reply'; text: string };
+  type ChatMessage = { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor'; text: string };
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [agentCursor, setAgentCursor] = useState<{ x: number; y: number } | null>(null);
   const [showAssistant, setShowAssistant] = useState(false);
   const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
+  // Chat-mode conversation history sent to the conversant backend (separate from
+  // chatMessages, which also mixes in agent-mode action steps).
+  const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatStreamingReply, setChatStreamingReply] = useState<string | null>(null);
+  const taskSuggestion = useTaskSuggestion();
+
+  type SidebarSession = {
+    id: string;
+    mode: 'agent' | 'chat';
+    title: string;
+    messages: ChatMessage[];
+    chatHistory: { role: 'user' | 'assistant'; content: string }[];
+    updatedAt: number;
+  };
+
+  const [sidebarSessions, setSidebarSessions] = useState<SidebarSession[]>(() => {
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_SESSIONS_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [currentSessionId, setCurrentSessionId] = useState<string>(() => crypto.randomUUID());
+  const [showSessionHistory, setShowSessionHistory] = useState(false);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_SESSIONS_STORAGE_KEY, JSON.stringify(sidebarSessions));
+    } catch {
+      // Ignore storage failures and keep the browser usable.
+    }
+  }, [sidebarSessions]);
+
+  useEffect(() => {
+    if (chatMessages.length === 0) return;
+    const firstUserMessage = chatMessages.find(m => m.role === 'user')?.text;
+    const title = firstUserMessage?.slice(0, 40) || (assistantMode === 'agent' ? 'Agent task' : 'Chat');
+
+    setSidebarSessions(prev => {
+      const existing = prev.find(s => s.id === currentSessionId);
+      let updated: SidebarSession[];
+      if (existing) {
+        updated = prev.map(s =>
+          s.id === currentSessionId ? { ...s, messages: chatMessages, chatHistory, updatedAt: Date.now() } : s
+        );
+      } else {
+        updated = [
+          { id: currentSessionId, mode: assistantMode, title, messages: chatMessages, chatHistory, updatedAt: Date.now() },
+          ...prev,
+        ];
+      }
+      updated.sort((a, b) => b.updatedAt - a.updatedAt);
+      return updated.slice(0, 100);
+    });
+  }, [chatMessages]);
+
+  function startNewSidebarSession() {
+    setChatMessages([]);
+    setChatHistory([]);
+    setChatInput("");
+    taskSuggestion.clear();
+    setCurrentSessionId(crypto.randomUUID());
+    setShowSessionHistory(false);
+  }
+
+  function openSidebarSession(session: SidebarSession) {
+    setChatMessages(session.messages);
+    setChatHistory(session.chatHistory);
+    setAssistantMode(session.mode);
+    setCurrentSessionId(session.id);
+    setShowSessionHistory(false);
+    taskSuggestion.clear();
+  }
+
+  function deleteSidebarSession(sessionId: string) {
+    setSidebarSessions(prev => prev.filter(s => s.id !== sessionId));
+    if (sessionId === currentSessionId) {
+      startNewSidebarSession();
+    }
+  }
+
+  function formatSessionDate(timestamp: number): string {
+    const date = new Date(timestamp);
+    const sameYear = date.getFullYear() === new Date().getFullYear();
+    return date.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  }
+  const chatLoadingText = useLoadingText(isChatLoading);
+  const imageAttachment = useImageAttachment();
+  const [newTabRoutingError, setNewTabRoutingError] = useState<string | null>(null);
+  const closedTabsRef = useRef<Tab[]>([]);
+  const [showFindBar, setShowFindBar] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findMatches, setFindMatches] = useState<{ activeMatch: number; matches: number } | null>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  type DownloadEntry = { id: string; filename: string; percent: number | null; done: boolean; success?: boolean; path?: string };
+  const [downloads, setDownloads] = useState<DownloadEntry[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
   const [platform, setPlatform] = useState<'win32' | 'darwin' | 'linux'>('win32');
   const [tabWidth, setTabWidth] = useState(240);
   const [isAgentRunning, setIsAgentRunning] = useState(false);
   const [isAgentPaused, setIsAgentPaused] = useState(false);
+  const [expandedAgentGroups, setExpandedAgentGroups] = useState<Set<number>>(new Set());
+
+  function toggleAgentGroup(startIndex: number) {
+    setExpandedAgentGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(startIndex)) {
+        next.delete(startIndex);
+      } else {
+        next.add(startIndex);
+      }
+      return next;
+    });
+  }
 
   // Sidebar resizing state
   const [sidebarWidth, setSidebarWidth] = useState(350);
@@ -575,53 +749,157 @@ function App() {
     }
   };
 
-  function handleAgentSend() {
+  async function getActivePageContextMessage(): Promise<{ role: 'system'; content: string } | null> {
+    const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (!activeTab || isInternalUrl(activeTab.url)) return null;
+
+    const webview = getActiveWebview();
+    if (!webview) return null;
+
+    try {
+      const text: string = await webview.executeJavaScript("document.body ? document.body.innerText : ''");
+      if (!text) return null;
+      const truncated = text.slice(0, 6000);
+      return {
+        role: 'system',
+        content: `The user is currently viewing "${activeTab.title || activeTab.url}" (${activeTab.url}). Page content:\n${truncated}`,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function requestChatReply(history: { role: 'user' | 'assistant'; content: string }[], imageUrl?: string) {
+    setIsChatLoading(true);
+    try {
+      const pageContext = await getActivePageContextMessage();
+      const payloadMessages = [...(pageContext ? [pageContext] : []), ...history];
+
+      let accumulated = "";
+      const result = await window.api?.chatStreamRequest(
+        { agentRole: "conversant", messages: payloadMessages, ...(imageUrl ? { imageUrl } : {}) },
+        (delta: string) => {
+          accumulated += delta;
+          setIsChatLoading(false);
+          setChatStreamingReply(accumulated);
+        }
+      );
+
+      if (result && !result.error) {
+        const replyText = accumulated || (typeof result.data?.reply === "string" ? result.data.reply : "");
+        if (replyText) {
+          setChatMessages(prev => [...prev, { role: 'reply', text: replyText }]);
+          setChatHistory(prev => [...prev, { role: 'assistant', content: replyText }]);
+        }
+      } else {
+        setChatMessages(prev => [...prev, { role: 'warning', text: `Chat error: ${result?.text || "unknown error"}` }]);
+      }
+    } catch (error) {
+      setChatMessages(prev => [...prev, { role: 'warning', text: `Network error: ${String(error)}` }]);
+    } finally {
+      setChatStreamingReply(null);
+      setIsChatLoading(false);
+    }
+  }
+
+  function startAgentRun(taskText: string, contextHistory: { role: 'user' | 'assistant'; content: string }[]) {
+    const contextLines = contextHistory
+      .slice(-6)
+      .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+      .join('\n');
+    const fullInstruction = contextLines
+      ? `Context from a prior chat conversation:\n${contextLines}\n\nTask: ${taskText}`
+      : taskText;
+
+    // The agent screenshots the active tab's <webview> (or, for a new-tab page, the
+    // page itself) to work — it can't do anything useful while a chat/history tab
+    // (no webview) is active, e.g. right after a handoff from the Chat tab.
+    const activeTab = tabsRef.current.find(t => t.isActive);
+    if (activeTab && (isChatUrl(activeTab.url) || isHistoryUrl(activeTab.url))) {
+      const existingBrowsableTab = tabsRef.current.find(t => !isChatUrl(t.url) && !isHistoryUrl(t.url));
+      if (existingBrowsableTab) {
+        activateTab(existingBrowsableTab.id);
+      } else {
+        addTab(NEW_TAB_URL);
+      }
+    }
+
+    taskSuggestion.clear();
+    setShowAssistant(true);
+    setAssistantMode('agent');
+    setChatMessages(prev => [...prev, { role: 'agent', text: `Switched to Agent mode for: "${taskText}"` }]);
+    setIsAgentRunning(true);
+    setIsAgentPaused(false);
+    window.api?.runAgentInstruction(fullInstruction);
+  }
+
+  async function handleAgentSend() {
     const text = chatInput.trim();
     if (!text) return;
-    setChatMessages(prev => [...prev, { role: 'user', text }]);
+    if (assistantMode === 'chat' && isChatLoading) return;
+
     setChatInput("");
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    setIsAgentRunning(true);
-    setIsAgentPaused(false);
-    (window as any).api?.runAgentInstruction(text);
+
+    if (assistantMode === 'agent') {
+      setChatMessages(prev => [...prev, { role: 'user', text }]);
+      setIsAgentRunning(true);
+      setIsAgentPaused(false);
+      window.api?.runAgentInstruction(text);
+      return;
+    }
+
+    // Chat mode
+    const attachedImage = imageAttachment.pendingImage;
+    imageAttachment.clear();
+    taskSuggestion.clear();
+    setChatMessages(prev => [...prev, { role: 'user', text }]);
+
+    const updatedHistory = [...chatHistory, { role: 'user' as const, content: text }];
+    setChatHistory(updatedHistory);
+
+    await requestChatReply(updatedHistory, attachedImage?.dataUrl);
+    taskSuggestion.suggest(text);
   }
 
   function handleAgentStop() {
-    (window as any).api?.stopAgent();
+    window.api?.stopAgent();
     setIsAgentRunning(false);
     setIsAgentPaused(false);
+    setAgentCursor(null);
   }
 
   function handleAgentPause() {
-    (window as any).api?.pauseAgent();
+    window.api?.pauseAgent();
     setIsAgentPaused(true);
   }
 
   function handleAgentResume() {
-    (window as any).api?.resumeAgent();
+    window.api?.resumeAgent();
     setIsAgentPaused(false);
   }
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentCursorFlash((_event: any, pos: { x: number; y: number }) => {
+    const cleanup = window.api?.onAgentCursorFlash((_event: any, pos: { x: number; y: number }) => {
       setAgentCursor({ x: pos.x, y: pos.y });
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentAction((_event: any, description: string) => {
+    const cleanup = window.api?.onAgentAction((_event: any, description: string) => {
       setChatMessages(prev => [...prev, { role: 'agent', text: description }]);
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentDone((_event: any, answer: string) => {
+    const cleanup = window.api?.onAgentDone((_event: any, answer: string) => {
       setIsAgentRunning(false);
       setIsAgentPaused(false);
+      setAgentCursor(null);
       if (answer && answer.trim()) {
         setChatMessages(prev => [...prev, { role: 'reply', text: answer.trim() }]);
       }
@@ -630,10 +908,20 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentWarn((_event: any, message: string) => {
+    const cleanup = window.api?.onAgentWarn((_event: any, message: string) => {
       if (message && message.trim()) {
-        setChatMessages(prev => [...prev, { role: 'reply', text: `⚠️ ${message.trim()}` }]);
+        setChatMessages(prev => [...prev, { role: 'warning', text: message.trim() }]);
       }
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.api?.onAgentSupervisor((_event: any, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => {
+      const text = info.refinedPrompt
+        ? `Noticed repeated actions (${info.count}/${info.limit}) — adjusting approach: "${info.refinedPrompt}"`
+        : `Noticed repeated actions (${info.count}/${info.limit}) on: "${info.task}"`;
+      setChatMessages(prev => [...prev, { role: 'supervisor', text }]);
     });
     return () => cleanup?.();
   }, []);
@@ -670,8 +958,8 @@ function App() {
       
       if (tabs.length > 0) {
         const widthPerTab = availableWidth / tabs.length;
-        // Clamp: Max 240px, Min 30px
-        setTabWidth(Math.min(240, Math.max(3, widthPerTab)));
+        // Clamp: Max 240px, Min 24px (enough to always keep the favicon visible)
+        setTabWidth(Math.min(240, Math.max(24, widthPerTab)));
       }
     };
 
@@ -706,12 +994,12 @@ function App() {
   }
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onReloadActiveTab(handleReloadActiveTab);
+    const cleanup = window.api?.onReloadActiveTab(handleReloadActiveTab);
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onZoomIn(() => {
+    const cleanup = window.api?.onZoomIn(() => {
       const activeWebview = getActiveWebview();
       if (activeWebview) {
         activeWebview.setZoomLevel(activeWebview.getZoomLevel() + 0.5);
@@ -721,7 +1009,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onZoomOut(() => {
+    const cleanup = window.api?.onZoomOut(() => {
       const activeWebview = getActiveWebview();
       if (activeWebview) {
         activeWebview.setZoomLevel(activeWebview.getZoomLevel() - 0.5);
@@ -730,21 +1018,36 @@ function App() {
     return () => cleanup?.();
   }, []);
 
+  useEffect(() => {
+    const cleanup = window.api?.onPinchZoom((direction) => {
+      const activeTab = tabsRef.current.find((tab) => tab.isActive);
+      const activeWebview = activeTab ? webviewRefs.current.get(activeTab.id) : null;
+      if (!activeWebview || !activeTab) return;
+
+      const current = pinchScaleRef.current.get(activeTab.id) ?? 1;
+      const next = Math.max(0.9, Math.min(2, current * (direction === "in" ? 1.08 : 1 / 1.08)));
+      pinchScaleRef.current.set(activeTab.id, next);
+      activeWebview.style.transform = next === 1 ? "" : `scale(${next})`;
+      activeWebview.style.transformOrigin = "center center";
+    });
+    return () => cleanup?.();
+  }, []);
+
   function handleMinimize() {
-    if ((window as any).api?.minimizeWindow) {
-      (window as any).api.minimizeWindow();
+    if (window.api?.minimizeWindow) {
+      window.api!.minimizeWindow();
     }
   }
 
   function handleMaximize() {
-    if ((window as any).api?.maximizeWindow) {
-      (window as any).api.maximizeWindow();
+    if (window.api?.maximizeWindow) {
+      window.api!.maximizeWindow();
     }
   }
 
   function handleClose() {
-    if ((window as any).api?.closeWindow) {
-      (window as any).api.closeWindow();
+    if (window.api?.closeWindow) {
+      window.api!.closeWindow();
     }
   }
 
@@ -817,8 +1120,9 @@ function App() {
   }
 
   async function handleNewTabSearch(query: string) {
+    setNewTabRoutingError(null);
     try {
-      const dispatcherRequest = (window as any).api?.dispatcherRequest?.(query);
+      const dispatcherRequest = window.api?.dispatcherRequest?.(query);
       if (!dispatcherRequest) {
         navigateActiveTabToUrl(googleSearchUrl(query));
         return;
@@ -840,6 +1144,8 @@ function App() {
       navigateActiveTabToUrl(chatUrl.toString());
     } catch (error) {
       console.error("Dispatcher route failed", error);
+      setNewTabRoutingError("Couldn't reach the AI router — showing a web search instead.");
+      window.setTimeout(() => setNewTabRoutingError(null), 4000);
       navigateActiveTabToUrl(googleSearchUrl(query));
     }
   }
@@ -954,7 +1260,7 @@ function App() {
 
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentNavigate((_event: any, url: string) => {
+    const cleanup = window.api?.onAgentNavigate((_event: any, url: string) => {
       if (activeTabId) {
         updateTabUrl(activeTabId, url);
       }
@@ -964,7 +1270,7 @@ function App() {
 
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentNewTab((_event: any, url?: string) => {
+    const cleanup = window.api?.onAgentNewTab((_event: any, url?: string) => {
       if (url) {
         addTab(url);
       } else {
@@ -975,14 +1281,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentReloadActiveTab(() => {
+    const cleanup = window.api?.onAgentReloadActiveTab(() => {
       handleReloadActiveTab();
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentCloseActiveTab(() => {
+    const cleanup = window.api?.onAgentCloseActiveTab(() => {
       if (activeTabId) {
         closeTab(activeTabId);
       }
@@ -991,7 +1297,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cleanup = (window as any).api?.onAgentSwitchToTab((_event: any, url: string) => {
+    const cleanup = window.api?.onAgentSwitchToTab((_event: any, url: string) => {
       const tab = tabsRef.current.find(t => t.url === url);
       if (tab) activateTab(tab.id);
     });
@@ -1000,8 +1306,98 @@ function App() {
 
   // Handle new-tab requests from webview guests via main process
   useEffect(() => {
-    const cleanup = (window as any).api?.onOpenUrlInNewTab((_event: any, url: string) => {
+    const cleanup = window.api?.onOpenUrlInNewTab((_event: any, url: string) => {
       if (url) addTab(url);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+    } catch {
+      // Ignore storage failures and keep the browser usable.
+    }
+  }, [history]);
+
+  useEffect(() => {
+    const cleanup = window.api?.onOpenHistory(() => {
+      const targetTabId = activeTabId ?? tabsRef.current.find(t => t.isActive)?.id;
+      if (targetTabId) updateTabUrl(targetTabId, "indus://history");
+    });
+    return () => cleanup?.();
+  }, [activeTabId]);
+
+  useEffect(() => {
+    const cleanup = window.api?.onFocusAddressBar(() => {
+      const input = document.querySelector('.address-input') as HTMLInputElement | null;
+      input?.focus();
+      input?.select();
+    });
+    return () => cleanup?.();
+  }, []);
+
+  function closeFindBar() {
+    const webview = getActiveWebview();
+    webview?.stopFindInPage?.('clearSelection');
+    setShowFindBar(false);
+    setFindQuery("");
+    setFindMatches(null);
+  }
+
+  function performFind(query: string, forward: boolean, findNext: boolean) {
+    const webview = getActiveWebview();
+    if (!webview) return;
+    if (!query) {
+      webview.stopFindInPage?.('clearSelection');
+      setFindMatches(null);
+      return;
+    }
+    webview.findInPage?.(query, { forward, findNext });
+  }
+
+  useEffect(() => {
+    const cleanup = window.api?.onFindInPage(() => {
+      setShowFindBar(true);
+      window.setTimeout(() => findInputRef.current?.focus(), 0);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    setShowFindBar(false);
+  }, [activeTabId]);
+
+  useEffect(() => {
+    const webview = getActiveWebview();
+    if (!webview) return;
+    const handler = (e: any) => {
+      setFindMatches({ activeMatch: e.result.activeMatchOrdinal, matches: e.result.matches });
+    };
+    webview.addEventListener('found-in-page', handler);
+    return () => webview.removeEventListener('found-in-page', handler);
+  }, [activeTabId]);
+
+  useEffect(() => {
+    const cleanup = window.api?.onDownloadStarted((_event: any, info: { id: string; filename: string }) => {
+      setDownloads(prev => [...prev, { id: info.id, filename: info.filename, percent: 0, done: false }]);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.api?.onDownloadProgress((_event: any, info: { id: string; percent: number | null }) => {
+      setDownloads(prev => prev.map(d => d.id === info.id ? { ...d, percent: info.percent } : d));
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.api?.onDownloadDone((_event: any, info: { id: string; success: boolean; path: string }) => {
+      setDownloads(prev => prev.map(d => d.id === info.id ? { ...d, done: true, success: info.success, path: info.path } : d));
+      window.setTimeout(() => {
+        setDownloads(prev => prev.filter(d => d.id !== info.id));
+      }, 6000);
     });
     return () => cleanup?.();
   }, []);
@@ -1019,25 +1415,8 @@ function App() {
       {/* Mouse Coordinate Display */}
       {showMouseCoords && (
         <div
+          className="mouse-coords-overlay"
           onClick={() => setShowMouseCoords(false)}
-          style={{
-            position: 'fixed',
-            top: '12px',
-            right: '12px',
-            zIndex: 99999,
-            background: 'rgba(20, 20, 20, 0.92)',
-            color: '#e0e0e0',
-            fontFamily: 'monospace',
-            fontSize: '13px',
-            padding: '6px 12px',
-            borderRadius: '6px',
-            border: '1px solid rgba(255,255,255,0.15)',
-            cursor: 'pointer',
-            userSelect: 'none',
-            backdropFilter: 'blur(4px)',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-            pointerEvents: 'all',
-          }}
           title="Click to close"
         >
           X: {mousePos.x} &nbsp; Y: {mousePos.y}
@@ -1064,6 +1443,7 @@ function App() {
             <div
             key={tab.id}
             onClick={() => activateTab(tab.id)}
+            onContextMenu={(e) => handleTabContextMenu(e, tab)}
             className={`tab ${tab.isActive ? "active" : ""}`}
             style={{ width: `${tabWidth}px` }}
             >
@@ -1182,7 +1562,12 @@ function App() {
                 className="new-tab-shell"
                 style={{ display: tab.isActive ? "flex" : "none" }}
               >
-                <NewTabPage displayName="npsboy" onSearch={handleNewTabSearch} />
+                <NewTabPage
+                  displayName="npsboy"
+                  onSearch={handleNewTabSearch}
+                  routingError={newTabRoutingError}
+                  onOpenChat={() => updateTabUrl(tab.id, "indus://chat")}
+                />
               </div>
             );
           } else if (isChatUrl(tab.url)) {
@@ -1192,7 +1577,29 @@ function App() {
                 className="chat-page-shell"
                 style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
               >
-                <ChatPage tabId={tab.id} initialUrl={tab.url} onUrlChange={(newUrl) => updateTabUrl(tab.id, newUrl)} onTitleChange={(title) => setTabTitle(tab.id, title)} />
+                <ChatPage
+                  tabId={tab.id}
+                  initialUrl={tab.url}
+                  onUrlChange={(newUrl) => updateTabUrl(tab.id, newUrl)}
+                  onTitleChange={(title) => setTabTitle(tab.id, title)}
+                  onExitToNewTab={() => updateTabUrl(tab.id, NEW_TAB_URL)}
+                  onStartAgentTask={(text, taskHistory) => startAgentRun(text, taskHistory)}
+                />
+              </div>
+            );
+          } else if (isHistoryUrl(tab.url)) {
+            return (
+              <div
+                key={tab.id}
+                className="history-page-shell"
+                style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
+              >
+                <HistoryPage
+                  entries={history}
+                  onOpenUrl={(url) => addTab(url)}
+                  onClear={() => setHistory([])}
+                  onClose={() => updateTabUrl(tab.id, NEW_TAB_URL)}
+                />
               </div>
             );
           } else {
@@ -1219,18 +1626,118 @@ function App() {
           }
         })}
 
+        {showFindBar && (
+          <div className="find-bar">
+            <input
+              ref={findInputRef}
+              className="find-bar-input"
+              value={findQuery}
+              onChange={(e) => {
+                setFindQuery(e.target.value);
+                performFind(e.target.value, true, false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  performFind(findQuery, !e.shiftKey, true);
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  closeFindBar();
+                }
+              }}
+              placeholder="Find in page"
+            />
+            <span className="find-bar-count">
+              {findMatches ? `${findMatches.matches > 0 ? findMatches.activeMatch : 0}/${findMatches.matches}` : ""}
+            </span>
+            <button type="button" className="find-bar-nav" onClick={() => performFind(findQuery, false, true)} aria-label="Previous match">‹</button>
+            <button type="button" className="find-bar-nav" onClick={() => performFind(findQuery, true, true)} aria-label="Next match">›</button>
+            <button type="button" className="find-bar-close" onClick={closeFindBar} aria-label="Close find bar">×</button>
+          </div>
+        )}
+
+        {downloads.length > 0 && (
+          <div className="download-toast-list">
+            {downloads.map((d) => (
+              <div
+                key={d.id}
+                className={`download-toast${d.done ? (d.success ? ' download-toast-done' : ' download-toast-failed') : ''}`}
+                onClick={() => d.done && d.success && d.path && window.api?.showItemInFolder(d.path)}
+              >
+                <span className="download-toast-name">{d.filename}</span>
+                <span className="download-toast-status">
+                  {!d.done ? (d.percent != null ? `${d.percent}%` : "Downloading…") : d.success ? "Done" : "Failed"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {showAssistant && (
           <div 
             className="assistant-sidebar" 
             style={{ width: `${sidebarWidth}px` }}
           >
-            <div 
+            <div
               className="sidebar-resizer"
               onMouseDown={(e) => {
                 e.preventDefault();
                 setIsResizingSidebar(true);
               }}
             />
+            <div className="assistant-sidebar-top">
+              <span className="assistant-sidebar-title">{assistantMode === 'agent' ? 'Agent' : 'Chat'}</span>
+              <div className="assistant-sidebar-top-actions">
+                <button
+                  type="button"
+                  className="assistant-icon-btn"
+                  title="New session"
+                  aria-label="New session"
+                  onClick={startNewSidebarSession}
+                  disabled={isAgentRunning}
+                >
+                  <span className="material-symbols-outlined">edit_square</span>
+                </button>
+                <button
+                  type="button"
+                  className={`assistant-icon-btn${showSessionHistory ? ' active' : ''}`}
+                  title="Session history"
+                  aria-label="Session history"
+                  onClick={() => setShowSessionHistory(v => !v)}
+                >
+                  <span className="material-symbols-outlined">history</span>
+                </button>
+              </div>
+            </div>
+            {showSessionHistory ? (
+              <div className="assistant-session-history">
+                {sidebarSessions.filter(s => s.mode === assistantMode).length === 0 ? (
+                  <div className="assistant-session-empty">No {assistantMode === 'agent' ? 'agent' : 'chat'} sessions yet.</div>
+                ) : (
+                  sidebarSessions
+                    .filter(s => s.mode === assistantMode)
+                    .map(session => (
+                      <div
+                        key={session.id}
+                        className={`assistant-session-item${session.id === currentSessionId ? ' active' : ''}`}
+                        onClick={() => openSidebarSession(session)}
+                      >
+                        <span className="assistant-session-title">{session.title}</span>
+                        <span className="assistant-session-date">{formatSessionDate(session.updatedAt)}</span>
+                        <button
+                          type="button"
+                          className="assistant-session-delete"
+                          onClick={(e) => { e.stopPropagation(); deleteSidebarSession(session.id); }}
+                          aria-label="Delete session"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))
+                )}
+              </div>
+            ) : (
             <div className="assistant-messages">
               {chatMessages.length === 0 ? (
                 <div className="assistant-empty-state">
@@ -1238,51 +1745,136 @@ function App() {
                   <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
                 </div>
               ) : (
-                chatMessages.map((msg, i) => {
-                  if (msg.role === 'user') {
-                    return (
-                      <div key={i} className="chat-message chat-message-user">
-                        <span className="chat-bubble">{msg.text}</span>
-                      </div>
-                    );
-                  }
-                  if (msg.role === 'reply') {
-                    return (
-                      <div key={i} className="chat-message chat-message-reply">
-                        <div className="chat-reply-header">
-                          <img src={logo} alt="Indus" className="agent-action-logo" />
+                (() => {
+                  type AgentBlock = { kind: 'agent-group'; startIndex: number; items: ChatMessage[] };
+                  type SingleBlock = { kind: 'single'; index: number; msg: ChatMessage };
+                  const blocks: (AgentBlock | SingleBlock)[] = [];
+
+                  chatMessages.forEach((msg, i) => {
+                    if (msg.role === 'agent') {
+                      const last = blocks[blocks.length - 1];
+                      if (last && last.kind === 'agent-group') {
+                        last.items.push(msg);
+                      } else {
+                        blocks.push({ kind: 'agent-group', startIndex: i, items: [msg] });
+                      }
+                    } else {
+                      blocks.push({ kind: 'single', index: i, msg });
+                    }
+                  });
+
+                  return blocks.map((block, blockIndex) => {
+                    if (block.kind === 'single') {
+                      const { index: i, msg } = block;
+                      if (msg.role === 'user') {
+                        return (
+                          <div key={i} className="chat-message chat-message-user">
+                            <span className="chat-bubble">{msg.text}</span>
+                          </div>
+                        );
+                      }
+                      if (msg.role === 'reply') {
+                        return (
+                          <div key={i} className="chat-message chat-message-reply">
+                            <div className="chat-reply-header">
+                              <img src={logo} alt="Indus" className="agent-action-logo" />
+                            </div>
+                            <div className="chat-bubble chat-bubble-reply markdown-content">
+                              <ReactMarkdown>{msg.text}</ReactMarkdown>
+                            </div>
+                          </div>
+                        );
+                      }
+                      if (msg.role === 'supervisor') {
+                        return (
+                          <div key={i} className="chat-message chat-message-supervisor">
+                            <span className="chat-bubble chat-bubble-supervisor">{msg.text}</span>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div key={i} className="chat-message chat-message-warning">
+                          <span className="chat-bubble chat-bubble-warning">{msg.text}</span>
                         </div>
-                        <div className="chat-bubble chat-bubble-reply markdown-content">
-                          <ReactMarkdown>{msg.text}</ReactMarkdown>
-                        </div>
-                      </div>
-                    );
-                  }
-                  const isFirst = i === 0 || chatMessages[i - 1].role !== 'agent';
-                  const isLast = i === chatMessages.length - 1 || chatMessages[i + 1].role !== 'agent';
-                  return (
-                    <div key={i} className={`agent-action-item${isFirst ? ' agent-action-first' : ''}${isLast ? ' agent-action-last' : ''}`}>
-                      {isFirst && (
+                      );
+                    }
+
+                    const isExpanded = expandedAgentGroups.has(block.startIndex);
+                    const isActiveGroup = isAgentRunning && blockIndex === blocks.length - 1;
+                    const currentStep = block.items[block.items.length - 1];
+
+                    return (
+                      <div key={`group-${block.startIndex}`} className="agent-action-item">
                         <div className="agent-action-header">
                           <img src={logo} alt="Indus" className="agent-action-logo" />
                         </div>
-                      )}
-                      <div className="agent-action-step">
-                        <div className="agent-action-line-wrap">
-                          <div className="agent-action-dot" />
-                          <div className="agent-action-connector" />
-                        </div>
-                        <div className="agent-action-text markdown-content">
-                          <ReactMarkdown>{msg.text}</ReactMarkdown>
-                        </div>
+                        <button
+                          type="button"
+                          className="agent-group-toggle"
+                          onClick={() => toggleAgentGroup(block.startIndex)}
+                          aria-expanded={isExpanded}
+                        >
+                          <span className={`agent-action-dot${isActiveGroup ? ' agent-action-dot-active' : ''}`} />
+                          <span className="agent-group-summary markdown-content">
+                            <ReactMarkdown>{currentStep.text}</ReactMarkdown>
+                          </span>
+                          <span className={`agent-group-chevron${isExpanded ? ' agent-group-chevron-expanded' : ''}`}>
+                            <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                              <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </span>
+                        </button>
+                        {isExpanded && (
+                          <div className="agent-action-steps">
+                            {block.items.map((item, j) => (
+                              <div key={j} className="agent-action-step">
+                                <div className="agent-action-line-wrap">
+                                  <div className="agent-action-dot" />
+                                  {j < block.items.length - 1 && <div className="agent-action-connector" />}
+                                </div>
+                                <div className="agent-action-text markdown-content">
+                                  <ReactMarkdown>{item.text}</ReactMarkdown>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  );
-                })
+                    );
+                  });
+                })()
+              )}
+              {assistantMode === 'chat' && chatStreamingReply !== null && (
+                <div className="chat-message chat-message-reply">
+                  <div className="chat-reply-header">
+                    <img src={logo} alt="Indus" className="agent-action-logo" />
+                  </div>
+                  <div className="chat-bubble chat-bubble-reply markdown-content">
+                    <ReactMarkdown>{chatStreamingReply}</ReactMarkdown>
+                  </div>
+                </div>
+              )}
+              {assistantMode === 'chat' && isChatLoading && chatStreamingReply === null && (
+                <div className="chat-message chat-message-reply">
+                  <span className="chat-bubble chat-bubble-reply chat-bubble-loading">{chatLoadingText}</span>
+                </div>
+              )}
+              {taskSuggestion.pendingTaskSuggestion && (
+                <div className="task-suggestion-banner">
+                  <span>This looks like a task.</span>
+                  <button
+                    type="button"
+                    className="task-suggestion-button"
+                    onClick={() => startAgentRun(taskSuggestion.pendingTaskSuggestion!, chatHistory)}
+                  >
+                    Switch to Agent
+                  </button>
+                </div>
               )}
               <div ref={chatEndRef} />
             </div>
-            
+            )}
+
             <div className="assistant-input-container">
               {isAgentRunning && (
                 <div className="agent-control-row">
@@ -1295,16 +1887,39 @@ function App() {
                   </button>
                 </div>
               )}
+              {assistantMode === 'chat' && imageAttachment.pendingImage && (
+                <div className="pending-attachment-chip">
+                  <img
+                    src={imageAttachment.pendingImage.dataUrl}
+                    alt={imageAttachment.pendingImage.name}
+                    className="pending-attachment-thumb"
+                  />
+                  <span className="pending-attachment-name">{imageAttachment.pendingImage.name}</span>
+                  <button
+                    type="button"
+                    className="pending-attachment-remove"
+                    onClick={imageAttachment.clear}
+                    aria-label="Remove attachment"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+              {assistantMode === 'chat' && imageAttachment.error && (
+                <div className="pending-attachment-error">{imageAttachment.error}</div>
+              )}
               <div className="assistant-input-row">
-                <textarea 
+                <textarea
                   ref={textareaRef}
                   placeholder={assistantMode === 'agent' ? "Assign any task..." : "Ask anything..."} 
-                  className="assistant-text-input" 
-                  autoFocus 
+                  className="assistant-text-input"
+                  autoFocus
                   rows={1}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onInput={handleInputResize}
+                  onPaste={assistantMode === 'chat' ? imageAttachment.handlePaste : undefined}
+                  onDrop={assistantMode === 'chat' ? imageAttachment.handleDrop : undefined}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -1324,14 +1939,30 @@ function App() {
                     <img src={stopIcon} alt="Stop" />
                   </button>
                 ) : (
-                  <button className="assistant-send-button" onClick={handleAgentSend}>➤</button>
+                  <button
+                    className="assistant-send-button"
+                    onClick={handleAgentSend}
+                    disabled={assistantMode === 'chat' && isChatLoading}
+                  >
+                    ➤
+                  </button>
                 )}
               </div>
               <div className="assistant-input-footer">
-                <button className="assistant-attach-button" title="Attach file">
-                  <span>📎</span>
-                </button>
-                
+                {assistantMode === 'chat' && (
+                  <>
+                    <input {...imageAttachment.fileInputProps} />
+                    <button
+                      type="button"
+                      className="assistant-attach-button"
+                      title="Attach image"
+                      onClick={imageAttachment.pick}
+                    >
+                      <span>📎</span>
+                    </button>
+                  </>
+                )}
+
                 <div style={{ position: 'relative' }}>
                   <button 
                     className="assistant-mode-button" 

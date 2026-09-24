@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, session, shell } from "electron";
 import path from "path";
 import { ipcMain } from "electron";
 import { readFileSync } from "fs";
@@ -8,6 +8,7 @@ const APP_URL = "http://localhost:5173";
 
 const dispatcherPrompt = readFileSync(path.join(__dirname, "agent/prompts/dispatcher-prompt.md"), "utf-8");
 const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
+const taskClassifierPrompt = readFileSync(path.join(__dirname, "agent/prompts/task-classifier-prompt.md"), "utf-8");
 
 async function postChat(payload: any) {
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
@@ -37,7 +38,11 @@ function attachShortcutHandler(contents) {
         case "t":
             if (input.isAutoRepeat) return;
             event.preventDefault();
-            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:new-tab");
+            if (input.shift) {
+                BrowserWindow.getAllWindows()[0]?.webContents.send("browser:reopen-closed-tab");
+            } else {
+                BrowserWindow.getAllWindows()[0]?.webContents.send("browser:new-tab");
+            }
             break;
         case "w":
             if (input.isAutoRepeat) return;
@@ -52,6 +57,18 @@ function attachShortcutHandler(contents) {
             event.preventDefault();
             BrowserWindow.getAllWindows()[0]?.webContents.send("browser:zoom-out");
             break;
+        case "f":
+            event.preventDefault();
+            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:find-in-page");
+            break;
+        case "l":
+            event.preventDefault();
+            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:focus-address-bar");
+            break;
+        case "h":
+            event.preventDefault();
+            BrowserWindow.getAllWindows()[0]?.webContents.send("browser:open-history");
+            break;
         case "q":
             runAgent();
             break;
@@ -62,6 +79,32 @@ function attachShortcutHandler(contents) {
   });
 }
 
+
+function setupDownloads() {
+    // Webview tags use this partition (see App.tsx's <webview partition="persist:indus-browser">),
+    // which is separate from the main window's default session.
+    const downloadSession = session.fromPartition("persist:indus-browser");
+    downloadSession.on("will-download", (_event, item) => {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+        mainWc?.send("browser:download-started", { id, filename: item.getFilename() });
+
+        item.on("updated", (_updatedEvent, state) => {
+            if (state !== "progressing" || item.isPaused()) return;
+            const total = item.getTotalBytes();
+            const percent = total > 0 ? Math.round((item.getReceivedBytes() / total) * 100) : null;
+            mainWc?.send("browser:download-progress", { id, percent });
+        });
+
+        item.once("done", (_doneEvent, state) => {
+            mainWc?.send("browser:download-done", {
+                id,
+                success: state === "completed",
+                path: item.getSavePath(),
+            });
+        });
+    });
+}
 
 function createWindow() {
     const win = new BrowserWindow({
@@ -85,7 +128,15 @@ function createWindow() {
 
     attachShortcutHandler(win.webContents);
 
-    win.webContents.setVisualZoomLevelLimits(1, 3);
+    // Native pinch-to-zoom scales the whole compositor surface of the
+    // window it's enabled on — for a <webview> guest that means the host
+    // chrome (tabs, toolbar) gets visually stretched right along with the
+    // page, since the guest is just an embedded layer in the host's
+    // compositor. So native visual zoom is left disabled everywhere, and
+    // zoom is instead driven by the 'zoom-changed' event below, which fires
+    // per-webContents (keyboard, ctrl+wheel, or trackpad pinch) and lets us
+    // apply a plain layout zoom (setZoomLevel) to just the webview guest.
+    win.webContents.setVisualZoomLevelLimits(1, 1);
 
     win.removeMenu();
 
@@ -111,6 +162,18 @@ function createWindow() {
         // Skip the main window's webContents — already handled above
         if (contents === win.webContents) return;
         attachShortcutHandler(contents);
+
+        // Keep native page-scale zoom off (see note above) and instead
+        // forward zoom requests (trackpad pinch, ctrl+wheel) to the
+        // renderer, which applies a CSS transform: scale() to just this
+        // webview's DOM element — a smooth image-like scale, not a layout
+        // recalculation, and scoped only to the page content.
+        if (contents.getType() === "webview") {
+            contents.setVisualZoomLevelLimits(1, 1);
+            contents.on("zoom-changed", (_event, zoomDirection) => {
+                win.webContents.send("browser:pinch-zoom", zoomDirection);
+            });
+        }
 
         // Intercept new-window requests from webview guests (target="_blank", window.open)
         // and route them to the renderer to open in a new tab instead of a new BrowserWindow
@@ -148,7 +211,14 @@ ipcMain.on('close-window', (event) => {
     if (win) win.close();
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+    createWindow();
+    setupDownloads();
+});
+
+ipcMain.on('show-item-in-folder', (_event, filePath: string) => {
+    shell.showItemInFolder(filePath);
+});
 
 ipcMain.handle('agent:run-instruction', async (_event, instruction: string) => {
     await runAgent(instruction);
@@ -260,6 +330,20 @@ ipcMain.handle('dispatcher-request', async (_event, text: string) => {
             agentRole: "dispatcher",
             messages: [
                 { role: "system", content: dispatcherPrompt },
+                { role: "user", content: text }
+            ]
+        });
+    } catch (error: any) {
+        return { error: true, status: 0, text: error.message };
+    }
+});
+
+ipcMain.handle('classify-chat-input', async (_event, text: string) => {
+    try {
+        return await postChat({
+            agentRole: "dispatcher",
+            messages: [
+                { role: "system", content: taskClassifierPrompt },
                 { role: "user", content: text }
             ]
         });

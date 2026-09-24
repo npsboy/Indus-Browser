@@ -1,32 +1,16 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import "./NewTabPage.css";
 import logo from "../assets/logos/Logo-Orange.png";
+import { useLoadingText } from "../hooks/useLoadingText";
 
 type NewTabPageProps = {
   displayName: string;
   onSearch: (query: string) => void | Promise<void>;
+  routingError?: string | null;
+  onOpenChat?: () => void;
 };
 
-function useLoadingText(isLoading: boolean) {
-  const [dotCount, setDotCount] = useState(0);
-
-  useEffect(() => {
-    if (!isLoading) {
-      setDotCount(0);
-      return;
-    }
-
-    const intervalId = window.setInterval(() => {
-      setDotCount((current) => (current + 1) % 4);
-    }, 400);
-
-    return () => window.clearInterval(intervalId);
-  }, [isLoading]);
-
-  return `Loading${dotCount > 0 ? ` ${".".repeat(dotCount)}` : ""}`;
-}
-
-function NewTabPage({ displayName, onSearch }: NewTabPageProps) {
+function NewTabPage({ displayName, onSearch, routingError, onOpenChat }: NewTabPageProps) {
   const [query, setQuery] = useState("");
   const [isRouting, setIsRouting] = useState(false);
   const loadingText = useLoadingText(isRouting);
@@ -47,6 +31,17 @@ function NewTabPage({ displayName, onSearch }: NewTabPageProps) {
 
   return (
     <div className="new-tab-page">
+      {onOpenChat && (
+        <button
+          type="button"
+          className="new-tab-open-chat-button"
+          title="Open chat"
+          aria-label="Open chat"
+          onClick={onOpenChat}
+        >
+          <span className="material-symbols-outlined">chat_bubble</span>
+        </button>
+      )}
       <div className="new-tab-content">
         <div className="new-tab-heading">
           <img src={logo} alt="" className="new-tab-heading-logo" />
@@ -69,7 +64,7 @@ function NewTabPage({ displayName, onSearch }: NewTabPageProps) {
             </button>
           </form>
           <div className="new-tab-loading" aria-live="polite">
-            {isRouting ? loadingText : ""}
+            {isRouting ? loadingText : routingError || ""}
           </div>
         </div>
       </div>

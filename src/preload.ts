@@ -32,6 +32,12 @@ function onZoomOut(callback: () => void) {
   return () => ipcRenderer.removeListener("browser:zoom-out", callback);
 }
 
+function onPinchZoom(callback: (direction: "in" | "out") => void) {
+  const listener = (_event: unknown, direction: "in" | "out") => callback(direction);
+  ipcRenderer.on("browser:pinch-zoom", listener);
+  return () => ipcRenderer.removeListener("browser:pinch-zoom", listener);
+}
+
 function onNewTab(callback: () => void) {
   ipcRenderer.on("browser:new-tab", callback);
   return () => ipcRenderer.removeListener("browser:new-tab", callback);
@@ -40,6 +46,45 @@ function onNewTab(callback: () => void) {
 function onCloseActiveTab(callback: () => void) {
   ipcRenderer.on("browser:close-active-tab", callback);
   return () => ipcRenderer.removeListener("browser:close-active-tab", callback);
+}
+
+function onReopenClosedTab(callback: () => void) {
+  ipcRenderer.on("browser:reopen-closed-tab", callback);
+  return () => ipcRenderer.removeListener("browser:reopen-closed-tab", callback);
+}
+
+function onFindInPage(callback: () => void) {
+  ipcRenderer.on("browser:find-in-page", callback);
+  return () => ipcRenderer.removeListener("browser:find-in-page", callback);
+}
+
+function onFocusAddressBar(callback: () => void) {
+  ipcRenderer.on("browser:focus-address-bar", callback);
+  return () => ipcRenderer.removeListener("browser:focus-address-bar", callback);
+}
+
+function onOpenHistory(callback: () => void) {
+  ipcRenderer.on("browser:open-history", callback);
+  return () => ipcRenderer.removeListener("browser:open-history", callback);
+}
+
+function onDownloadStarted(callback: (_event: any, info: { id: string; filename: string }) => void) {
+  ipcRenderer.on("browser:download-started", callback);
+  return () => ipcRenderer.removeListener("browser:download-started", callback);
+}
+
+function onDownloadProgress(callback: (_event: any, info: { id: string; percent: number | null }) => void) {
+  ipcRenderer.on("browser:download-progress", callback);
+  return () => ipcRenderer.removeListener("browser:download-progress", callback);
+}
+
+function onDownloadDone(callback: (_event: any, info: { id: string; success: boolean; path: string }) => void) {
+  ipcRenderer.on("browser:download-done", callback);
+  return () => ipcRenderer.removeListener("browser:download-done", callback);
+}
+
+function showItemInFolder(filePath: string) {
+  ipcRenderer.send("show-item-in-folder", filePath);
 }
 
 function onAgentNavigate(callback: (_event: any, url: string) => void) {
@@ -103,6 +148,11 @@ function onAgentWarn(callback: (_event: any, message: string) => void) {
   return () => ipcRenderer.removeListener('agent:warn', callback);
 }
 
+function onAgentSupervisor(callback: (_event: any, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) {
+  ipcRenderer.on('agent:supervisor', callback);
+  return () => ipcRenderer.removeListener('agent:supervisor', callback);
+}
+
 function onOpenUrlInNewTab(callback: (_event: any, url: string) => void) {
   ipcRenderer.on('browser:open-url-in-new-tab', callback);
   return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
@@ -135,6 +185,10 @@ function dispatcherRequest(text: string): Promise<any> {
     return ipcRenderer.invoke('dispatcher-request', text);
 }
 
+function classifyChatInput(text: string): Promise<any> {
+    return ipcRenderer.invoke('classify-chat-input', text);
+}
+
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
     minimizeWindow,
@@ -143,8 +197,17 @@ contextBridge.exposeInMainWorld('api', {
     onReloadActiveTab,
     onZoomIn,
     onZoomOut,
+    onPinchZoom,
     onNewTab,
     onCloseActiveTab,
+    onReopenClosedTab,
+    onFindInPage,
+    onFocusAddressBar,
+    onOpenHistory,
+    onDownloadStarted,
+    onDownloadProgress,
+    onDownloadDone,
+    showItemInFolder,
     onAgentNavigate,
     onAgentNewTab,
     onAgentReloadActiveTab,
@@ -158,8 +221,10 @@ contextBridge.exposeInMainWorld('api', {
     resumeAgent,
     onAgentDone,
     onAgentWarn,
+    onAgentSupervisor,
     onOpenUrlInNewTab,
     chatRequest,
     chatStreamRequest,
-    dispatcherRequest
+    dispatcherRequest,
+    classifyChatInput
 });

@@ -230,7 +230,7 @@ async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string
                     {
                         role: "system",
                         content: agentPrompt + (past_actions.length > 0
-                            ? "\n\nPrevious actions taken so far:\n" + past_actions.map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
+                            ? "\n\nPrevious actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n")
                             : "")
                     },
                     { role: "user", content: `User task: "${userPrompt}"${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${tabsContext}` }
@@ -253,7 +253,7 @@ async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string
     if (!response.ok) {
         const errText = await response.text();
         console.error(`Agent endpoint error ${response.status}:`, errText);
-        return null;
+        throw new Error(`Agent action endpoint returned ${response.status}: ${errText}`);
     }
     const data = await response.json();
     return data;
@@ -694,18 +694,27 @@ async function executeCommand(cmd: any): Promise<void> {
         BrowserWindow.getAllWindows()[0]?.focus();
         webviewInfo.wc.focus();
 
-        // sendInputEvent on Electron guest webContents (webview) expects PHYSICAL pixels,
-        // not CSS/logical pixels, on Windows with display scaling > 100%.
-        // Multiply by the display scale factor to correct for HiDPI.
-        const winBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
-        const display = winBounds
-            ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
-            : electronScreen.getPrimaryDisplay();
-        const sf = display.scaleFactor ?? 1;
+        // sendInputEvent on the TOP-LEVEL window's webContents expects PHYSICAL pixels,
+        // not CSS/logical pixels, on Windows with display scaling > 100% (this is the
+        // "renderer" surface case, e.g. clicking the new-tab page). Guest <webview>
+        // WebContents, however, already interpret sendInputEvent coordinates in the
+        // guest page's own CSS-pixel space (matching document.elementFromPoint) — scaling
+        // those by the display factor sends the native event to the wrong on-screen pixel,
+        // which is why clicks can look right (cursor overlay uses the unscaled coords) but
+        // fail to land on the intended element.
         const eventX = isRendererSurface ? Math.round(webviewInfo.x + relX) : relX;
         const eventY = isRendererSurface ? Math.round(webviewInfo.y + relY) : relY;
-        const physX = Math.round(eventX * sf);
-        const physY = Math.round(eventY * sf);
+        let physX = eventX;
+        let physY = eventY;
+        if (isRendererSurface) {
+            const winBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
+            const display = winBounds
+                ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
+                : electronScreen.getPrimaryDisplay();
+            const sf = display.scaleFactor ?? 1;
+            physX = Math.round(eventX * sf);
+            physY = Math.round(eventY * sf);
+        }
 
         // Native input events — these are trusted (isTrusted=true) and work on
         // all sites including those that reject synthetic JS events.
@@ -914,11 +923,16 @@ if (!tool) return;
     return cmd;
 }
 
-let past_actions: { tool: string; parameters: any; explanation: string; result?: string }[] = [];
+let past_actions: PastAction[] = [];
 let lastCursorPos: { x: number; y: number } | null = null;
 
 let agentStopped = false;
 let agentPaused = false;
+let agentRunning = false;
+
+const MAX_ITERATIONS_PER_TASK = 40;
+const MAX_TASK_DURATION_MS = 5 * 60 * 1000;
+const MAX_SUPERVISOR_INTERVENTIONS_PER_TASK = 3;
 
 export function setAgentStopped(v: boolean) {
     agentStopped = v;
@@ -1009,16 +1023,32 @@ async function waitForDomChange(timeout: number): Promise<void> {
     await Promise.all([minDelay, domChangePromise]);
 }
 
-function findRepetetion (currentTask, past_actions) {
-    function getWords(text) {
-        return text.toLowerCase().match(/\b\w+\b/g) || [];
+type PastAction = { tool: string; parameters: any; explanation: string; result?: string };
+
+/** Same tool aimed at the same target (e.g. same click coordinates/grid label)
+ * counts as a repeat regardless of how the model phrases its explanation. */
+function actionTargetKey(action: PastAction): string | null {
+    const params = action.parameters || {};
+    if (typeof params.x !== "undefined" && typeof params.y !== "undefined") {
+        return `${action.tool}:${params.x}:${params.y}`;
     }
-    const currentWords = new Set(getWords(currentTask.explanation));
+    return null;
+}
+
+function findRepetetion(currentAction: PastAction, past_actions: PastAction[]) {
+    function getWords(text: string) {
+        return (text || "").toLowerCase().match(/\b\w+\b/g) || [];
+    }
+    const currentKey = actionTargetKey(currentAction);
+    const currentWords = new Set(getWords(currentAction.explanation));
     let repeatCount = 0;
     for (const action of past_actions) {
+        if (action === currentAction) continue;
+        const sameTarget = currentKey !== null && actionTargetKey(action) === currentKey;
         const actionWords = new Set(getWords(action.explanation));
         const commonWords = new Set([...currentWords].filter(word => actionWords.has(word)));
-        if (commonWords.size >= Math.min(4, currentWords.size / 2)) {
+        const sameText = commonWords.size >= Math.min(4, Math.max(1, currentWords.size) / 2);
+        if (sameTarget || sameText) {
             repeatCount++;
         }
     }
@@ -1026,13 +1056,17 @@ function findRepetetion (currentTask, past_actions) {
 }
 
 export async function runAgentWithInstruction(instruction: string, resumeState: AgentRunResumeState = {}): Promise<string> {
+    if (agentRunning) {
+        throw new Error("Agent is already running. Stop the current run before starting a new one.");
+    }
+    agentRunning = true;
     throwIfStopped();
     const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
     let finalAnswer = "";
     let currentTaskIndex = 0;
     let plan: AgentTaskPlan;
     let startTaskIndex = 0;
-    
+
     try {
         agentStopped = false;
         agentPaused = false;
@@ -1068,7 +1102,10 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
             past_actions = [];
             lastCursorPos = null;
             let overridePrompt: string | null = null;
-            
+            let iterationCount = 0;
+            let supervisorInterventions = 0;
+            const taskStartTime = Date.now();
+
             while (true) {
                 try {
                     // Check stop flag
@@ -1076,6 +1113,13 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
 
                     // Wait if paused (returns true if stopped while paused)
                     if (await waitIfPaused()) break;
+
+                    iterationCount++;
+                    if (iterationCount > MAX_ITERATIONS_PER_TASK || Date.now() - taskStartTime > MAX_TASK_DURATION_MS) {
+                        console.error(`Agent exceeded step/time budget for task: "${currentTask}"`);
+                        mainWc?.send("agent:warn", `Agent gave up on task after too many steps: "${currentTask}"`);
+                        return finalAnswer;
+                    }
 
                     let promptToUse = overridePrompt || currentTask;
                     overridePrompt = null; // Clear it so it only applies to this immediate next run
@@ -1176,15 +1220,16 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                     }
 
                     const explanation = tool_arguments.explanation || "No explanation provided.";
-                    past_actions.push({
+                    const pushedAction: PastAction = {
                         tool: tool.name,
                         parameters: tool_arguments,
                         explanation,
                         ...(actionResult !== undefined ? { result: actionResult } : {})
-                    });
+                    };
+                    past_actions.push(pushedAction);
                     mainWc?.send("agent:action", explanation);
 
-                    let repetitionCount = findRepetetion(tool_arguments, past_actions);
+                    let repetitionCount = findRepetetion(pushedAction, past_actions);
                     if (repetitionCount > 2) {
                         throwIfStopped();
                         console.log("______________________________")
@@ -1192,6 +1237,18 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
                         const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
                         if (supervisorResponse?.abnormal_repetition) {
                             console.log("Supervisor detected abnormal repetition.");
+                            supervisorInterventions++;
+                            mainWc?.send("agent:supervisor", {
+                                count: supervisorInterventions,
+                                limit: MAX_SUPERVISOR_INTERVENTIONS_PER_TASK,
+                                task: currentTask,
+                                refinedPrompt: supervisorResponse.refined_prompt ?? null,
+                            });
+                            if (supervisorInterventions > MAX_SUPERVISOR_INTERVENTIONS_PER_TASK) {
+                                console.error(`Agent stuck: supervisor intervened ${supervisorInterventions} times without resolving repetition on task: "${currentTask}"`);
+                                mainWc?.send("agent:warn", `Agent appears stuck and could not complete task: "${currentTask}"`);
+                                return finalAnswer;
+                            }
                             if (supervisorResponse.refined_prompt) {
                                 console.log("Supervisor provided a refined prompt: ", supervisorResponse.refined_prompt);
                                 overridePrompt = supervisorResponse.refined_prompt;
@@ -1235,5 +1292,6 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
     } finally {
         agentStopped = false;
         agentPaused = false;
+        agentRunning = false;
     }
 }

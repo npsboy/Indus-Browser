@@ -824,8 +824,15 @@
   justify-content: center;
 }
 
-.chat-input-wrapper {
+.chat-input-stack {
   max-width: 700px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-input-wrapper {
   width: 100%;
   background-color: #2b2b2b;
   border-radius: 12px;
@@ -833,6 +840,87 @@
   align-items: flex-end;
   padding: 8px 12px;
   gap: 12px;
+}
+
+.chat-attach-btn {
+  background: transparent;
+  border: none;
+  color: #a9a29a;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  margin-bottom: 4px;
+  transition: color 0.2s;
+}
+
+.chat-attach-btn:hover {
+  color: #fff;
+}
+
+.chat-attach-btn .material-symbols-outlined {
+  font-size: 19px;
+}
+
+.chat-msg-attached-image {
+  display: block;
+  max-width: 260px;
+  max-height: 260px;
+  border-radius: 10px;
+  margin-bottom: 8px;
+  object-fit: cover;
+}
+
+.chat-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.chat-toast-error {
+  background: rgba(220, 38, 38, 0.15);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  color: #fca5a5;
+}
+
+.task-suggestion-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #202024;
+  border: 1px solid #3f3f46;
+  font-size: 12.5px;
+  color: #d4d4d8;
+  max-width: 700px;
+  margin: 8px auto 0;
+}
+
+.task-suggestion-button {
+  background: var(--accent, #d88c3e);
+  border: none;
+  color: #18181b;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.2s;
+}
+
+.task-suggestion-button:hover {
+  background: var(--accent-strong, #e39a49);
 }
 
 .chat-input-wrapper textarea {
