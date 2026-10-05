@@ -194,3 +194,63 @@
     height: 36px;
   }
 }
+
+/* ---- Incognito new tab ---- */
+.new-tab-page.incognito {
+  background: #1c1923;
+}
+
+.new-tab-page.incognito .new-tab-heading {
+  color: #e2dbee;
+}
+
+.new-tab-incognito-icon {
+  font-size: 46px;
+  color: #c9bfdc;
+}
+
+.new-tab-page.incognito .new-tab-search {
+  background: #262230;
+}
+
+.new-tab-incognito-info {
+  width: min(720px, 90vw);
+  text-align: left;
+  color: #b3abc2;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.new-tab-incognito-info p {
+  margin: 0;
+}
+
+.new-tab-incognito-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin: 22px 0;
+}
+
+.new-tab-incognito-columns h2 {
+  margin: 0 0 6px;
+  color: #e2dbee;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.new-tab-incognito-columns ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.new-tab-incognito-note {
+  color: #8f879e;
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .new-tab-incognito-columns {
+    grid-template-columns: 1fr;
+  }
+}

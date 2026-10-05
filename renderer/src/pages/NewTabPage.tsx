@@ -5,12 +5,13 @@ import { useLoadingText } from "../hooks/useLoadingText";
 
 type NewTabPageProps = {
   displayName: string;
+  incognito?: boolean;
   onSearch: (query: string) => void | Promise<void>;
   routingError?: string | null;
   onOpenChat?: () => void;
 };
 
-function NewTabPage({ displayName, onSearch, routingError, onOpenChat }: NewTabPageProps) {
+function NewTabPage({ displayName, incognito, onSearch, routingError, onOpenChat }: NewTabPageProps) {
   const [query, setQuery] = useState("");
   const [isRouting, setIsRouting] = useState(false);
   const loadingText = useLoadingText(isRouting);
@@ -30,7 +31,7 @@ function NewTabPage({ displayName, onSearch, routingError, onOpenChat }: NewTabP
   };
 
   return (
-    <div className="new-tab-page">
+    <div className={`new-tab-page${incognito ? " incognito" : ""}`}>
       {onOpenChat && (
         <button
           type="button"
@@ -43,16 +44,23 @@ function NewTabPage({ displayName, onSearch, routingError, onOpenChat }: NewTabP
         </button>
       )}
       <div className="new-tab-content">
-        <div className="new-tab-heading">
-          <img src={logo} alt="" className="new-tab-heading-logo" />
-          <h1>Welcome back, {displayName}</h1>
-        </div>
+        {incognito ? (
+          <div className="new-tab-heading">
+            <span className="material-symbols-outlined new-tab-incognito-icon" aria-hidden="true">domino_mask</span>
+            <h1>You’ve gone incognito</h1>
+          </div>
+        ) : (
+          <div className="new-tab-heading">
+            <img src={logo} alt="" className="new-tab-heading-logo" />
+            <h1>Welcome back, {displayName}</h1>
+          </div>
+        )}
         <div className="new-tab-search-stack">
           <form className="new-tab-search" onSubmit={handleSubmit}>
             <input
               className="new-tab-input"
               type="text"
-              placeholder="Search, ask or assign tasks."
+              placeholder={incognito ? "Search Google or type a URL" : "Search, ask or assign tasks."}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               disabled={isRouting}
@@ -67,6 +75,35 @@ function NewTabPage({ displayName, onSearch, routingError, onOpenChat }: NewTabP
             {isRouting ? loadingText : routingError || ""}
           </div>
         </div>
+        {incognito && (
+          <div className="new-tab-incognito-info">
+            <p>
+              Others who use this device won’t see your activity, so you can browse more privately.
+              This won’t change how data is collected by the websites you visit or by your network.
+            </p>
+            <div className="new-tab-incognito-columns">
+              <div>
+                <h2>Indus won’t save</h2>
+                <ul>
+                  <li>Your browsing history</li>
+                  <li>Cookies and site data</li>
+                  <li>Information entered in forms</li>
+                </ul>
+              </div>
+              <div>
+                <h2>Your activity might still be visible to</h2>
+                <ul>
+                  <li>Websites you visit</li>
+                  <li>Your employer or school</li>
+                  <li>Your internet service provider</li>
+                </ul>
+              </div>
+            </div>
+            <p className="new-tab-incognito-note">
+              Downloads you save stay on your device. Cookies and site data are deleted when you close all incognito windows.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

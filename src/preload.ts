@@ -1,5 +1,14 @@
 import {ipcRenderer, contextBridge} from 'electron';
 
+type WindowConfig = { incognito: boolean; partition: string; initialUrl?: string };
+
+// Fixed for the window's lifetime, and needed before the first render (it picks
+// the starting tabs and the <webview> partition), hence the synchronous fetch.
+const windowConfig: WindowConfig = ipcRenderer.sendSync('window:get-config');
+
+function openIncognitoWindow(url?: string) {
+    ipcRenderer.send('window:new-incognito', url);
+}
 
 function ping(){
     return ipcRenderer.invoke('ping');
@@ -17,55 +26,95 @@ function closeWindow() {
     ipcRenderer.send('close-window');
 }
 
-function onReloadActiveTab(callback: () => void) {
-  ipcRenderer.on("browser:reload-active-tab", callback);
-  return () => ipcRenderer.removeListener("browser:reload-active-tab", callback);
+function onBrowserCommand(callback: (name: string, arg?: number) => void) {
+  const listener = (_event: unknown, name: string, arg?: number) => callback(name, arg);
+  ipcRenderer.on("browser:command", listener);
+  return () => ipcRenderer.removeListener("browser:command", listener);
 }
 
-function onZoomIn(callback: () => void) {
-  ipcRenderer.on("browser:zoom-in", callback);
-  return () => ipcRenderer.removeListener("browser:zoom-in", callback);
+function onWindowMaximized(callback: (maximized: boolean) => void) {
+  const listener = (_event: unknown, maximized: boolean) => callback(maximized);
+  ipcRenderer.on("window:maximized", listener);
+  return () => ipcRenderer.removeListener("window:maximized", listener);
 }
 
-function onZoomOut(callback: () => void) {
-  ipcRenderer.on("browser:zoom-out", callback);
-  return () => ipcRenderer.removeListener("browser:zoom-out", callback);
+function onWindowBlur(callback: () => void) {
+  ipcRenderer.on("window:blur", callback);
+  return () => ipcRenderer.removeListener("window:blur", callback);
 }
 
-function onPinchZoom(callback: (direction: "in" | "out") => void) {
-  const listener = (_event: unknown, direction: "in" | "out") => callback(direction);
+function isWindowMaximized(): Promise<boolean> {
+  return ipcRenderer.invoke("window:is-maximized");
+}
+
+type NavCommit = { webContentsId: number; url: string; inPlace: boolean; replaced: boolean };
+
+function onNavCommit(callback: (info: NavCommit) => void) {
+  const listener = (_event: unknown, info: NavCommit) => callback(info);
+  ipcRenderer.on("browser:nav-commit", listener);
+  return () => ipcRenderer.removeListener("browser:nav-commit", listener);
+}
+
+function onAudioState(callback: (info: { webContentsId: number; audible: boolean }) => void) {
+  const listener = (_event: unknown, info: { webContentsId: number; audible: boolean }) => callback(info);
+  ipcRenderer.on("browser:audio-state", listener);
+  return () => ipcRenderer.removeListener("browser:audio-state", listener);
+}
+
+function writeClipboardText(text: string) {
+  ipcRenderer.send("clipboard:write-text", text);
+}
+
+function openDevTools(targetId: number, hostId: number, inspectAt?: { x: number; y: number }) {
+  ipcRenderer.send("devtools:open", targetId, hostId, inspectAt);
+}
+
+function closeDevTools(targetId: number) {
+  ipcRenderer.send("devtools:close", targetId);
+}
+
+function onDevToolsClosed(callback: (targetId: number) => void) {
+  const listener = (_event: unknown, targetId: number) => callback(targetId);
+  ipcRenderer.on("devtools:closed", listener);
+  return () => ipcRenderer.removeListener("devtools:closed", listener);
+}
+
+function getAllCookies(): Promise<any[]> {
+  return ipcRenderer.invoke("cookies:get-all");
+}
+
+function countCookiesForUrl(url: string): Promise<number> {
+  return ipcRenderer.invoke("cookies:count-for-url", url);
+}
+
+function removeCookie(cookie: { domain?: string; path?: string; secure?: boolean; name: string }): Promise<void> {
+  return ipcRenderer.invoke("cookies:remove", cookie);
+}
+
+function clearSiteData(site: string): Promise<void> {
+  return ipcRenderer.invoke("cookies:clear-site", site);
+}
+
+function clearAllSiteData(): Promise<void> {
+  return ipcRenderer.invoke("cookies:clear-all");
+}
+
+type GuestPoint = { x: number; y: number };
+
+function onPinchZoom(callback: (direction: "in" | "out", point?: GuestPoint) => void) {
+  const listener = (_event: unknown, direction: "in" | "out", point?: GuestPoint) => callback(direction, point);
   ipcRenderer.on("browser:pinch-zoom", listener);
   return () => ipcRenderer.removeListener("browser:pinch-zoom", listener);
 }
 
-function onNewTab(callback: () => void) {
-  ipcRenderer.on("browser:new-tab", callback);
-  return () => ipcRenderer.removeListener("browser:new-tab", callback);
+function onPinchPan(callback: (info: { webContentsId: number; dx: number; dy: number }) => void) {
+  const listener = (_event: unknown, info: { webContentsId: number; dx: number; dy: number }) => callback(info);
+  ipcRenderer.on("browser:pinch-pan", listener);
+  return () => ipcRenderer.removeListener("browser:pinch-pan", listener);
 }
 
-function onCloseActiveTab(callback: () => void) {
-  ipcRenderer.on("browser:close-active-tab", callback);
-  return () => ipcRenderer.removeListener("browser:close-active-tab", callback);
-}
-
-function onReopenClosedTab(callback: () => void) {
-  ipcRenderer.on("browser:reopen-closed-tab", callback);
-  return () => ipcRenderer.removeListener("browser:reopen-closed-tab", callback);
-}
-
-function onFindInPage(callback: () => void) {
-  ipcRenderer.on("browser:find-in-page", callback);
-  return () => ipcRenderer.removeListener("browser:find-in-page", callback);
-}
-
-function onFocusAddressBar(callback: () => void) {
-  ipcRenderer.on("browser:focus-address-bar", callback);
-  return () => ipcRenderer.removeListener("browser:focus-address-bar", callback);
-}
-
-function onOpenHistory(callback: () => void) {
-  ipcRenderer.on("browser:open-history", callback);
-  return () => ipcRenderer.removeListener("browser:open-history", callback);
+function setPinchZoomed(webContentsId: number, zoomed: boolean) {
+  ipcRenderer.send("browser:set-pinch-zoomed", webContentsId, zoomed);
 }
 
 function onDownloadStarted(callback: (_event: any, info: { id: string; filename: string }) => void) {
@@ -153,7 +202,7 @@ function onAgentSupervisor(callback: (_event: any, info: { count: number; limit:
   return () => ipcRenderer.removeListener('agent:supervisor', callback);
 }
 
-function onOpenUrlInNewTab(callback: (_event: any, url: string) => void) {
+function onOpenUrlInNewTab(callback: (_event: any, url: string, info?: { disposition?: string; openerId?: number }) => void) {
   ipcRenderer.on('browser:open-url-in-new-tab', callback);
   return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
 }
@@ -191,19 +240,29 @@ function classifyChatInput(text: string): Promise<any> {
 
 contextBridge.exposeInMainWorld('api', {
     ping: ping,
+    windowConfig,
+    openIncognitoWindow,
     minimizeWindow,
     maximizeWindow,
     closeWindow,
-    onReloadActiveTab,
-    onZoomIn,
-    onZoomOut,
     onPinchZoom,
-    onNewTab,
-    onCloseActiveTab,
-    onReopenClosedTab,
-    onFindInPage,
-    onFocusAddressBar,
-    onOpenHistory,
+    onPinchPan,
+    setPinchZoomed,
+    onBrowserCommand,
+    onWindowMaximized,
+    onWindowBlur,
+    isWindowMaximized,
+    onAudioState,
+    onNavCommit,
+    writeClipboardText,
+    openDevTools,
+    closeDevTools,
+    onDevToolsClosed,
+    getAllCookies,
+    countCookiesForUrl,
+    removeCookie,
+    clearSiteData,
+    clearAllSiteData,
     onDownloadStarted,
     onDownloadProgress,
     onDownloadDone,

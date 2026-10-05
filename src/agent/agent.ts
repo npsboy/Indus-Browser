@@ -1,4 +1,5 @@
-import { BrowserWindow, webContents as allWebContents, screen as electronScreen } from "electron";
+import { webContents as allWebContents, screen as electronScreen } from "electron";
+import { getMainWindow } from "../windows";
 import { processScreenshotForAgent } from "./screenshotProcessor";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -339,7 +340,7 @@ type ActiveSurface = {
 
 /** Returns the active webview's guest WebContents and its bounds in window-space. */
 async function getActiveWebviewWc(): Promise<ActiveSurface | null> {
-    const win = BrowserWindow.getAllWindows()[0];
+    const win = getMainWindow();
     if (!win) return null;
 
     // Ask the renderer for the active webview's bounding rect AND its WebContents ID
@@ -672,7 +673,7 @@ async function snapToNearestClickablePoint(
 
 async function executeCommand(cmd: any): Promise<void> {
     throwIfStopped();
-    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    const mainWc = getMainWindow()?.webContents;
     if (!mainWc) return;
 
     if (cmd.type === "agent:new-tab") {
@@ -691,7 +692,7 @@ async function executeCommand(cmd: any): Promise<void> {
         const relY = isRendererSurface ? Math.round(snappedPoint.y - webviewInfo.y) : snappedPoint.y;
         lastCursorPos = { x: relX, y: relY };
 
-        BrowserWindow.getAllWindows()[0]?.focus();
+        getMainWindow()?.focus();
         webviewInfo.wc.focus();
 
         // sendInputEvent on the TOP-LEVEL window's webContents expects PHYSICAL pixels,
@@ -707,7 +708,7 @@ async function executeCommand(cmd: any): Promise<void> {
         let physX = eventX;
         let physY = eventY;
         if (isRendererSurface) {
-            const winBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
+            const winBounds = getMainWindow()?.getBounds();
             const display = winBounds
                 ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
                 : electronScreen.getPrimaryDisplay();
@@ -753,7 +754,7 @@ async function executeCommand(cmd: any): Promise<void> {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
         // Ensure the webview has focus so keystrokes aren't silently dropped.
-        BrowserWindow.getAllWindows()[0]?.focus();
+        getMainWindow()?.focus();
         webviewInfo.wc.focus();
 
         // Send each character as a full keyDown → insertText → keyUp sequence.
@@ -783,7 +784,7 @@ async function executeCommand(cmd: any): Promise<void> {
     } else if (cmd.type === "agent:navigate") {
         if (cmd.new_tab !== false) {
             // If the URL is already open in a tab, switch to it instead of opening a new one.
-            const mainWin = BrowserWindow.getAllWindows()[0];
+            const mainWin = getMainWindow();
             const openTabs: { id: string; url: string; isActive: boolean }[] = mainWin
                 ? await mainWin.webContents.executeJavaScript('window.__tabs || []').catch(() => [])
                 : [];
@@ -801,11 +802,11 @@ async function executeCommand(cmd: any): Promise<void> {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
         // Focus both the OS window and the webContents so scroll events are routed correctly.
-        BrowserWindow.getAllWindows()[0]?.focus();
+        getMainWindow()?.focus();
         webviewInfo.wc.focus();
         // Move mouse to the scroll target first so the renderer picks the right element.
         // sendInputEvent needs physical pixels — scale by display factor.
-        const scrollWinBounds = BrowserWindow.getAllWindows()[0]?.getBounds();
+        const scrollWinBounds = getMainWindow()?.getBounds();
         const scrollDisplay = scrollWinBounds
             ? electronScreen.getDisplayNearestPoint({ x: scrollWinBounds.x, y: scrollWinBounds.y })
             : electronScreen.getPrimaryDisplay();
@@ -821,7 +822,7 @@ async function executeCommand(cmd: any): Promise<void> {
         const webviewInfo = await getActiveWebviewWc();
         if (!webviewInfo) return;
         // Ensure the webview has focus so key events aren't silently dropped.
-        BrowserWindow.getAllWindows()[0]?.focus();
+        getMainWindow()?.focus();
         webviewInfo.wc.focus();
 
         // Parse modifier+key combinations like "ctrl+a", "ctrl+shift+t", etc.
@@ -1061,7 +1062,7 @@ export async function runAgentWithInstruction(instruction: string, resumeState: 
     }
     agentRunning = true;
     throwIfStopped();
-    const mainWc = BrowserWindow.getAllWindows()[0]?.webContents;
+    const mainWc = getMainWindow()?.webContents;
     let finalAnswer = "";
     let currentTaskIndex = 0;
     let plan: AgentTaskPlan;
