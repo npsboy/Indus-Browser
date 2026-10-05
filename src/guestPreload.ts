@@ -1,6 +1,22 @@
 // Preload for every <webview> guest (attached in main.ts's will-attach-webview).
 // Runs in an isolated world, so pages can't see or tamper with it.
-import { ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer } from "electron";
+
+// Global Privacy Control: the Sec-GPC header is added by main (privacy.ts);
+// pages that check from script read navigator.globalPrivacyControl instead.
+// Defined synchronously so it is in place before any page script runs.
+try {
+  const flags: { gpc: boolean } = ipcRenderer.sendSync("shields:page-flags", location.href);
+  if (flags?.gpc) {
+    contextBridge.executeInMainWorld({
+      func: () => {
+        Object.defineProperty(Navigator.prototype, "globalPrivacyControl", { get: () => true, configurable: true });
+      },
+    });
+  }
+} catch {
+  // Never let a privacy nicety break the page.
+}
 
 // While the host has this guest pinch-zoomed (a CSS scale on the <webview>),
 // two-finger / wheel scrolling pans the zoomed view instead of scrolling the

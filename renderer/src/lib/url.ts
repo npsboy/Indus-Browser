@@ -5,8 +5,33 @@ const LOCALHOST_RE = /^localhost(:\d+)?([/?#].*)?$/i;
 const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?([/?#].*)?$/;
 const DOMAIN_RE = /^[^\s/?#:]+\.[a-z][a-z0-9-]{1,62}(:\d+)?([/?#].*)?$/i;
 
-export function googleSearchUrl(query: string) {
-  return "https://www.google.com/search?q=" + encodeURIComponent(query);
+export const SEARCH_ENGINES: Record<SearchEngine, { name: string; url: string }> = {
+  google: { name: "Google", url: "https://www.google.com/search?q=" },
+  duckduckgo: { name: "DuckDuckGo", url: "https://duckduckgo.com/?q=" },
+  brave: { name: "Brave Search", url: "https://search.brave.com/search?q=" },
+  bing: { name: "Bing", url: "https://www.bing.com/search?q=" },
+  startpage: { name: "Startpage", url: "https://www.startpage.com/do/search?q=" },
+};
+
+// The user's chosen engine (Settings). App keeps this in sync with main.
+let searchEngine: SearchEngine = "google";
+
+export function setSearchEngine(engine: SearchEngine) {
+  if (engine in SEARCH_ENGINES) searchEngine = engine;
+}
+
+export function searchEngineName() {
+  return SEARCH_ENGINES[searchEngine].name;
+}
+
+/** "Google Search", "Brave Search", ... for suggestion rows. */
+export function searchEngineLabel() {
+  const name = searchEngineName();
+  return name.endsWith("Search") ? name : `${name} Search`;
+}
+
+export function webSearchUrl(query: string) {
+  return SEARCH_ENGINES[searchEngine].url + encodeURIComponent(query);
 }
 
 /** True when the text should be treated as an address rather than a search. */
@@ -23,7 +48,7 @@ export function toNavigableUrl(input: string): string | null {
   if (SCHEME_RE.test(text) && !/\s/.test(text)) return text;
   if (LOCALHOST_RE.test(text) || IPV4_RE.test(text)) return `http://${text}`;
   if (DOMAIN_RE.test(text)) return `https://${text}`;
-  return googleSearchUrl(text);
+  return webSearchUrl(text);
 }
 
 /** Chrome-style elided URL for display while the address bar isn't focused. */

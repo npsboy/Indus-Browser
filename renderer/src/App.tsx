@@ -18,11 +18,13 @@ import HistoryPage, { type HistoryEntry } from "./pages/HistoryPage";
 import CookiesPage from "./pages/CookiesPage";
 import ContextMenu, { type ContextMenuState, type MenuItem } from "./components/ContextMenu";
 import DevToolsPanel, { type DevToolsRequest } from "./components/DevToolsPanel";
-import { formatDisplayUrl, googleSearchUrl, hostnameOf, looksLikeUrl, siteOf, toNavigableUrl } from "./lib/url";
+import { formatDisplayUrl, hostnameOf, looksLikeUrl, searchEngineLabel, searchEngineName, setSearchEngine, siteOf, toNavigableUrl, webSearchUrl } from "./lib/url";
+import SettingsPage from "./pages/SettingsPage";
 
 const NEW_TAB_URL = "indus://newtab";
 const HISTORY_URL = "indus://history";
 const COOKIES_URL = "indus://cookies";
+const SETTINGS_URL = "indus://settings";
 const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
 const HISTORY_STORAGE_KEY = "indus-browser.history.v1";
 const SIDEBAR_SESSIONS_STORAGE_KEY = "indus-browser.sidebar-sessions.v1";
@@ -36,6 +38,7 @@ const isNewTabUrl = (url: string) => url === NEW_TAB_URL;
 const isChatUrl = (url: string) => url.startsWith("indus://chat");
 const isHistoryUrl = (url: string) => url === HISTORY_URL;
 const isCookiesUrl = (url: string) => url.startsWith(COOKIES_URL);
+const isSettingsUrl = (url: string) => url === SETTINGS_URL;
 
 // Chrome's zoom presets.
 const ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
@@ -110,13 +113,14 @@ type ApiResponse = {
 };
 
 function isInternalUrl(url: string) {
-  return isNewTabUrl(url) || isChatUrl(url) || isHistoryUrl(url) || isCookiesUrl(url);
+  return isNewTabUrl(url) || isChatUrl(url) || isHistoryUrl(url) || isCookiesUrl(url) || isSettingsUrl(url);
 }
 
 function tabDisplayTitle(tab: { url: string; title?: string }) {
   if (isNewTabUrl(tab.url)) return "New Tab";
   if (isHistoryUrl(tab.url)) return "History";
   if (isCookiesUrl(tab.url)) return "Cookies and site data";
+  if (isSettingsUrl(tab.url)) return "Settings";
   return tab.title || tab.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0];
 }
 
@@ -835,7 +839,7 @@ function App() {
       const preview = selection.length > 28 ? `${selection.slice(0, 28)}…` : selection;
       items.push(
         { label: "Copy", icon: "content_copy", shortcut: "Ctrl+C", onSelect: () => el.copy() },
-        { label: `Search Google for “${preview}”`, icon: "search", onSelect: () => addTab(googleSearchUrl(selection), { openerId: tabId }) },
+        { label: `Search ${searchEngineName()} for “${preview}”`, icon: "search", onSelect: () => addTab(webSearchUrl(selection), { openerId: tabId }) },
         SEPARATOR
       );
     }
@@ -1651,7 +1655,7 @@ function App() {
     if (looksLikeUrl(query)) {
       out.push({ kind: "url", label: formatDisplayUrl(toNavigableUrl(query)!), url: toNavigableUrl(query)! });
     } else {
-      out.push({ kind: "search", label: query, detail: "Google Search", url: googleSearchUrl(query) });
+      out.push({ kind: "search", label: query, detail: searchEngineLabel(), url: webSearchUrl(query) });
     }
 
     const seen = new Set(out.map((s) => s.url));
@@ -1688,7 +1692,7 @@ function App() {
       );
 
     if (out[0].kind === "url" && !/[/:]/.test(query)) {
-      out.push({ kind: "search", label: query, detail: "Google Search", url: googleSearchUrl(query) });
+      out.push({ kind: "search", label: query, detail: searchEngineLabel(), url: webSearchUrl(query) });
     }
     return out.slice(0, 8);
   }
@@ -1822,13 +1826,13 @@ function App() {
     setNewTabRoutingError(null);
     // Incognito skips the AI router, which would send the query to the backend.
     if (IS_INCOGNITO) {
-      navigateActiveTabToUrl(looksLikeUrl(query) ? toNavigableUrl(query) ?? googleSearchUrl(query) : googleSearchUrl(query));
+      navigateActiveTabToUrl(looksLikeUrl(query) ? toNavigableUrl(query) ?? webSearchUrl(query) : webSearchUrl(query));
       return;
     }
     try {
       const dispatcherRequest = window.api?.dispatcherRequest?.(query);
       if (!dispatcherRequest) {
-        navigateActiveTabToUrl(googleSearchUrl(query));
+        navigateActiveTabToUrl(webSearchUrl(query));
         return;
       }
 
@@ -1836,7 +1840,7 @@ function App() {
       const route = !response?.error ? parseDispatcherRoute(response?.data) : null;
 
       if (route?.routing === "web-search") {
-        navigateActiveTabToUrl(googleSearchUrl(query));
+        navigateActiveTabToUrl(webSearchUrl(query));
         return;
       }
 
@@ -1850,7 +1854,7 @@ function App() {
       console.error("Dispatcher route failed", error);
       setNewTabRoutingError("Couldn't reach the AI router — showing a web search instead.");
       window.setTimeout(() => setNewTabRoutingError(null), 4000);
-      navigateActiveTabToUrl(googleSearchUrl(query));
+      navigateActiveTabToUrl(webSearchUrl(query));
     }
   }
 
@@ -2109,7 +2113,7 @@ function App() {
   }
 
   // ---- Popovers (site info, app menu) ------------------------------------------
-  const [siteInfo, setSiteInfo] = useState<{ cookies: number | null; confirmClear: boolean } | null>(null);
+  const [siteInfo, setSiteInfo] = useState<{ cookies: number | null; confirmClear: boolean; shields: ShieldsTabState | null } | null>(null);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
   const siteInfoRef = useRef<HTMLDivElement>(null);
   const appMenuRef = useRef<HTMLDivElement>(null);
@@ -2122,11 +2126,38 @@ function App() {
   function openSiteInfo() {
     const activeTab = tabsRef.current.find((t) => t.isActive);
     if (!activeTab || isInternalUrl(activeTab.url)) return;
-    setSiteInfo({ cookies: null, confirmClear: false });
+    setSiteInfo({ cookies: null, confirmClear: false, shields: null });
     window.api?.countCookiesForUrl(activeTab.url)
       .then((count) => setSiteInfo((prev) => (prev ? { ...prev, cookies: count } : prev)))
       .catch(() => {});
+    const wcId = getWebContentsIdForTab(activeTab.id);
+    if (wcId !== null) {
+      window.api?.getShieldsTabState(wcId)
+        .then((shields) => setSiteInfo((prev) => (prev ? { ...prev, shields } : prev)))
+        .catch(() => {});
+    }
   }
+
+  async function toggleShieldsForActiveSite() {
+    const shields = siteInfo?.shields;
+    if (!shields?.site) return;
+    await window.api?.setShieldsForSite(shields.site, !shields.shieldsUp);
+    setSiteInfo(null);
+    handleReloadActiveTab();
+  }
+
+  // ---- User settings (owned by main; see src/privacy.ts) ------------------------
+  const [settings, setSettings] = useState<BrowserSettings | null>(null);
+
+  useEffect(() => {
+    const apply = (next: BrowserSettings) => {
+      setSearchEngine(next.searchEngine);
+      setSettings(next);
+    };
+    window.api?.getSettings().then(apply).catch(() => {});
+    const cleanup = window.api?.onSettingsChanged(apply);
+    return () => cleanup?.();
+  }, []);
 
   async function clearActiveSiteData() {
     const activeTab = tabsRef.current.find((t) => t.isActive);
@@ -2590,6 +2621,24 @@ function App() {
                     </div>
                   </div>
                 </div>
+                {siteInfo.shields?.site && (
+                  <div className="site-info-row">
+                    <span className={`material-symbols-outlined site-info-row-icon${siteInfo.shields.shieldsUp ? " secure" : ""}`}>
+                      {siteInfo.shields.shieldsUp ? "shield" : "remove_moderator"}
+                    </span>
+                    <div className="site-info-row-text">
+                      <div>Shields are {siteInfo.shields.shieldsUp ? "up" : "down"} for this site</div>
+                      <div className="site-info-row-sub">
+                        {siteInfo.shields.shieldsUp
+                          ? `${siteInfo.shields.blocked} tracker${siteInfo.shields.blocked === 1 ? "" : "s"} & ads blocked on this page`
+                          : "Trackers, ads and cookie protections are off here"}
+                      </div>
+                    </div>
+                    <button type="button" className="popover-text-btn" onClick={toggleShieldsForActiveSite}>
+                      {siteInfo.shields.shieldsUp ? "Turn off" : "Turn on"}
+                    </button>
+                  </div>
+                )}
                 <button
                   type="button"
                   className="site-info-row clickable"
@@ -2641,7 +2690,7 @@ function App() {
               ref={addressInputRef}
               type="text"
               value={addressFocused ? AddressBarValue : formatDisplayUrl(AddressBarValue)}
-              placeholder="Search Google or type a URL"
+              placeholder={`Search ${searchEngineName()} or type a URL`}
               spellCheck={false}
               autoComplete="off"
               onChange={handleAddressChange}
@@ -2798,6 +2847,7 @@ function App() {
                   [
                     ...(IS_INCOGNITO ? [] : [{ label: "History", icon: "history", shortcut: "Ctrl+H", onSelect: () => openSingletonTab(HISTORY_URL, isHistoryUrl) }]),
                     { label: "Cookies and site data", icon: "cookie", shortcut: "Ctrl+Shift+Del", onSelect: () => openSingletonTab(COOKIES_URL, isCookiesUrl) },
+                    { label: "Settings & Shields", icon: "settings", shortcut: "", onSelect: () => openSingletonTab(SETTINGS_URL, isSettingsUrl) },
                     { label: "Find…", icon: "find_in_page", shortcut: "Ctrl+F", disabled: !activeIsWeb, onSelect: openFindBar },
                     { label: activeDevtoolsOpen ? "Close developer tools" : "Developer tools", icon: "code", shortcut: "F12", disabled: !activeIsWeb, onSelect: () => activeTabForUi && toggleDevToolsForTab(activeTabForUi.id) },
                   ] as const
@@ -2882,6 +2932,16 @@ function App() {
                 style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
               >
                 <CookiesPage key={tab.url} initialSite={initialSite} onClose={() => closeTab(tab.id)} />
+              </div>
+            );
+          } else if (isSettingsUrl(tab.url)) {
+            return (
+              <div
+                key={tab.id}
+                className="cookies-page-shell"
+                style={{ display: tab.isActive ? "flex" : "none", flex: 1, width: "100%", height: "100%" }}
+              >
+                <SettingsPage settings={settings} onClose={() => closeTab(tab.id)} />
               </div>
             );
           } else {

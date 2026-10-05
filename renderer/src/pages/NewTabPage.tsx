@@ -2,6 +2,7 @@ import { useState } from "react";
 import "./NewTabPage.css";
 import logo from "../assets/logos/Logo-Orange.png";
 import { useLoadingText } from "../hooks/useLoadingText";
+import { searchEngineName } from "../lib/url";
 
 type NewTabPageProps = {
   displayName: string;
@@ -60,7 +61,7 @@ function NewTabPage({ displayName, incognito, onSearch, routingError, onOpenChat
             <input
               className="new-tab-input"
               type="text"
-              placeholder={incognito ? "Search Google or type a URL" : "Search, ask or assign tasks."}
+              placeholder={incognito ? `Search ${searchEngineName()} or type a URL` : "Search, ask or assign tasks."}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               disabled={isRouting}

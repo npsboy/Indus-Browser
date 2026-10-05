@@ -13,6 +13,27 @@ declare global {
     sameSite?: string;
   };
 
+  type SearchEngine = "google" | "duckduckgo" | "brave" | "bing" | "startpage";
+
+  type BrowserSettings = {
+    shields: {
+      blockTrackers: boolean;
+      upgradeHttps: boolean;
+      blockThirdPartyCookies: boolean;
+      sendGpc: boolean;
+      preventWebRtcLeak: boolean;
+    };
+    shieldsDownSites: string[];
+    customBlockList: string[];
+    searchEngine: SearchEngine;
+    secureDns: { mode: "off" | "automatic" | "secure"; provider: "cloudflare" | "quad9" | "google" | "mullvad" | "custom"; customUrl: string };
+    proxy: { mode: "system" | "direct" | "custom"; rules: string; bypass: string };
+  };
+
+  type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? (T[K] extends unknown[] ? T[K] : DeepPartial<T[K]>) : T[K] };
+
+  type ShieldsTabState = { site: string; shieldsUp: boolean; blocked: number };
+
   interface Window {
     api?: {
       ping: () => Promise<unknown>;
@@ -39,6 +60,11 @@ declare global {
       removeCookie: (cookie: { domain?: string; path?: string; secure?: boolean; name: string }) => Promise<void>;
       clearSiteData: (site: string) => Promise<void>;
       clearAllSiteData: () => Promise<void>;
+      getSettings: () => Promise<BrowserSettings>;
+      updateSettings: (patch: DeepPartial<BrowserSettings>) => Promise<BrowserSettings>;
+      onSettingsChanged: (callback: (settings: BrowserSettings) => void) => (() => void);
+      getShieldsTabState: (webContentsId: number) => Promise<ShieldsTabState | null>;
+      setShieldsForSite: (site: string, up: boolean) => Promise<BrowserSettings>;
       onDownloadStarted: (callback: (_event: any, info: { id: string; filename: string }) => void) => (() => void);
       onDownloadProgress: (callback: (_event: any, info: { id: string; percent: number | null }) => void) => (() => void);
       onDownloadDone: (callback: (_event: any, info: { id: string; success: boolean; path: string }) => void) => (() => void);

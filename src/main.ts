@@ -4,6 +4,7 @@ import { ipcMain } from "electron";
 import { readFileSync } from "fs";
 import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
 import { getMainWindow, setMainWindow } from "./windows";
+import { applyNetworkSettings, attachShieldsToGuest, blockedCountFor, getSettings, gpcEnabledFor, loadSettings, setShieldsForSite, setupShields, shieldsUpFor, siteOf, startFilterEngine, updateSettings } from "./privacy";
 
 const APP_URL = "http://localhost:5173";
 
@@ -261,6 +262,7 @@ function createWindow(opts: { incognito?: boolean; initialUrl?: string } = {}) {
     const shellId = win.webContents.id;
     windowConfigs.set(shellId, config);
     setupDownloads(session.fromPartition(config.partition));
+    setupShields(session.fromPartition(config.partition));
     if (incognito) {
         openIncognitoWindows++;
     } else {
@@ -348,6 +350,7 @@ app.on("web-contents-created", function (_event, contents) {
     // webview's DOM element — a smooth image-like scale, not a layout
     // recalculation, and scoped only to the page content.
     if (contents.getType() === "webview") {
+        attachShieldsToGuest(contents);
         // The limits are reset on navigation, so re-apply them each time
         // or native pinch can shrink the page below 100%.
         const lockVisualZoom = () => contents.setVisualZoomLevelLimits(1, 1);
@@ -589,7 +592,45 @@ ipcMain.handle('cookies:clear-all', async (event) => {
 });
 
 app.whenReady().then(() => {
+    loadSettings();
+    applyNetworkSettings();
+    startFilterEngine();
     createWindow();
+});
+
+// ---- Settings & Shields ----------------------------------------------------
+
+function broadcastSettings() {
+    for (const id of windowConfigs.keys()) webContents.fromId(id)?.send("settings:changed", getSettings());
+}
+
+ipcMain.handle('settings:get', () => getSettings());
+
+ipcMain.handle('settings:update', (_event, patch: unknown) => {
+    const next = updateSettings(patch);
+    broadcastSettings();
+    return next;
+});
+
+ipcMain.handle('shields:get-tab-state', (_event, webContentsId: number) => {
+    const guest = webContents.fromId(webContentsId);
+    if (!guest || guest.getType() !== "webview") return null;
+    let host = "";
+    try { host = new URL(guest.getURL()).hostname; } catch { /* not a web page */ }
+    const site = siteOf(host);
+    return { site, shieldsUp: shieldsUpFor(site), blocked: blockedCountFor(webContentsId) };
+});
+
+ipcMain.handle('shields:set-site', (_event, site: string, up: boolean) => {
+    if (typeof site !== "string") return getSettings();
+    const next = setShieldsForSite(site, Boolean(up));
+    broadcastSettings();
+    return next;
+});
+
+// Asked synchronously by every page's guest preload before page scripts run.
+ipcMain.on('shields:page-flags', (event, url: string) => {
+    event.returnValue = { gpc: event.sender.getType() === "webview" && typeof url === "string" && gpcEnabledFor(url) };
 });
 
 // Read synchronously by the preload, before the UI first renders.

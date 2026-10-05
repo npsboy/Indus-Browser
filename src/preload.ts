@@ -234,6 +234,28 @@ function dispatcherRequest(text: string): Promise<any> {
     return ipcRenderer.invoke('dispatcher-request', text);
 }
 
+function getSettings(): Promise<any> {
+  return ipcRenderer.invoke("settings:get");
+}
+
+function updateSettings(patch: unknown): Promise<any> {
+  return ipcRenderer.invoke("settings:update", patch);
+}
+
+function onSettingsChanged(callback: (settings: any) => void) {
+  const listener = (_event: unknown, settings: any) => callback(settings);
+  ipcRenderer.on("settings:changed", listener);
+  return () => ipcRenderer.removeListener("settings:changed", listener);
+}
+
+function getShieldsTabState(webContentsId: number): Promise<any> {
+  return ipcRenderer.invoke("shields:get-tab-state", webContentsId);
+}
+
+function setShieldsForSite(site: string, up: boolean): Promise<any> {
+  return ipcRenderer.invoke("shields:set-site", site, up);
+}
+
 function classifyChatInput(text: string): Promise<any> {
     return ipcRenderer.invoke('classify-chat-input', text);
 }
@@ -263,6 +285,11 @@ contextBridge.exposeInMainWorld('api', {
     removeCookie,
     clearSiteData,
     clearAllSiteData,
+    getSettings,
+    updateSettings,
+    onSettingsChanged,
+    getShieldsTabState,
+    setShieldsForSite,
     onDownloadStarted,
     onDownloadProgress,
     onDownloadDone,
