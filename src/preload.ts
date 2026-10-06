@@ -191,6 +191,11 @@ function onAgentNotes(callback: (_event: any, sessionId: string, notes: string) 
   return () => ipcRenderer.removeListener('agent:notes', callback);
 }
 
+function onAgentTip(callback: (_event: any, sessionId: string, tip: { id: string; auto: boolean; description: string; text: string }) => void) {
+  ipcRenderer.on('agent:tip', callback);
+  return () => ipcRenderer.removeListener('agent:tip', callback);
+}
+
 function onAgentSupervisor(callback: (_event: any, sessionId: string, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) {
   ipcRenderer.on('agent:supervisor', callback);
   return () => ipcRenderer.removeListener('agent:supervisor', callback);
@@ -323,6 +328,7 @@ contextBridge.exposeInMainWorld('api', {
     onAgentWarn,
     onAgentSupervisor,
     onAgentNotes,
+    onAgentTip,
     onOpenUrlInNewTab,
     chatRequest,
     chatStreamRequest,

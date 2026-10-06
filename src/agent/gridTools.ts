@@ -130,7 +130,7 @@ export const GRID_MODE_TOOLS = [
                 type: "object",
                 properties: {
                     text: { type: "string", description: "The text to save. With mode \"edit\": the new text that takes the place of `find` (an empty string deletes it)." },
-                    mode: { type: "string", enum: ["append", "replace", "edit"], description: "\"append\" adds to the end of your notes (default). \"edit\" overwrites one part: the exact text given in `find` is replaced by `text` — use it to update a fact, tick off a plan step or delete an outdated line without rewriting everything. \"replace\" overwrites all of your notes, e.g. to tidy up." },
+                    mode: { type: "string", enum: ["append", "replace", "edit"], description: "\"append\" adds to the end of your notes (default). \"edit\" overwrites one part: the exact text given in `find` is replaced by `text` — use it to update a fact, tick off a plan step or delete an outdated line without rewriting everything. To tick off a task or mark it completed, always edit its existing line (\"[ ] 2. …\" → \"[x] 2. …\") instead of appending a new note. \"replace\" overwrites all of your notes, e.g. to tidy up." },
                     find: { type: "string", description: "Only for mode \"edit\": the exact text in your notepad to overwrite, copied character for character. Include enough of it to be unique (e.g. a whole line)." },
                     explanation: { type: "string", description: "one tiny sentence describing what you are noting down." },
                 },
@@ -149,6 +149,21 @@ export const GRID_MODE_TOOLS = [
                     explanation: { type: "string", description: "one tiny sentence describing why you are reading your notes." },
                 },
                 required: []
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_tips",
+            description: "Ask for task-specific tips when you are stuck or looping on something (e.g. topic \"shopping\" when a cart quantity won't go down). The tips are then shown to you in every later step. Unknown topics return the list of available ones.",
+            parameters: {
+                type: "object",
+                properties: {
+                    topic: { type: "string", description: "The tip topic id, e.g. \"shopping\"." },
+                    explanation: { type: "string", description: "one tiny sentence describing why you need the tips." },
+                },
+                required: ["topic"]
             }
         }
     },

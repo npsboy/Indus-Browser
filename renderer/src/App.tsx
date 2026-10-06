@@ -1014,6 +1014,10 @@ function App() {
   const [agentNotes, setAgentNotes] = useState('');
   const [isNotepadOpen, setIsNotepadOpen] = useState(false);
   const [expandedNotes, setExpandedNotes] = useState<Set<number>>(new Set());
+  // Task tips the agent has been sent in this conversation (automatic or asked for), newest last.
+  const [receivedTips, setReceivedTips] = useState<{ id: string; auto: boolean; description: string; text: string }[]>([]);
+  const [isTipsOpen, setIsTipsOpen] = useState(false);
+  const [expandedTips, setExpandedTips] = useState<Set<string>>(new Set());
   // Message indexes of supervisor/warning notices whose open state was flipped from its default
   // (supervisor starts collapsed, warning starts expanded).
   const [toggledNotices, setToggledNotices] = useState<Set<number>>(new Set());
@@ -1043,6 +1047,8 @@ function App() {
     chatHistory: { role: 'user' | 'assistant'; content: string }[];
     /** The agent's notepad for this conversation; carried into every run in it. */
     agentNotes?: string;
+    /** Set once an agent title has been generated, so it isn't requested again. */
+    titled?: boolean;
     updatedAt: number;
   };
 
@@ -1075,13 +1081,23 @@ function App() {
   function requestSessionTitle(sessionId: string, text: string) {
     window.api?.generateSessionTitle(text).then(result => {
       if (!result || result.error || !result.title) return;
-      setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: result.title } : s));
+      setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: result.title, titled: true } : s));
     }).catch(() => {});
   }
+
+  const titleRequestedRef = useRef(new Set<string>());
+  const sidebarSessionsRef = useRef(sidebarSessions);
+  sidebarSessionsRef.current = sidebarSessions;
 
   useEffect(() => {
     if (chatMessages.length === 0) return;
     const firstUserMessage = chatMessages.find(m => m.role === 'user')?.text;
+    // Also covers a chat that was handed to the agent: it starts as a chat session, so it's titled once the agent is running in it.
+    const alreadyTitled = sidebarSessionsRef.current.find(s => s.id === currentSessionId)?.titled;
+    if (assistantMode === 'agent' && firstUserMessage && !alreadyTitled && !titleRequestedRef.current.has(currentSessionId)) {
+      titleRequestedRef.current.add(currentSessionId);
+      requestSessionTitle(currentSessionId, firstUserMessage);
+    }
     const title = firstUserMessage?.slice(0, 40) || (assistantMode === 'agent' ? 'Agent task' : 'Chat');
 
     setSidebarSessions(prev => {
@@ -1092,7 +1108,6 @@ function App() {
           s.id === currentSessionId ? { ...s, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() } : s
         );
       } else {
-        if (assistantMode === 'agent' && firstUserMessage) requestSessionTitle(currentSessionId, firstUserMessage);
         updated = [
           { id: currentSessionId, mode: assistantMode, title, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() },
           ...prev,
@@ -1107,6 +1122,8 @@ function App() {
     setChatMessages([]);
     setChatHistory([]);
     setAgentNotes('');
+    setReceivedTips([]);
+    setExpandedTips(new Set());
     setExpandedNotes(new Set());
     setToggledNotices(new Set());
     setChatInput("");
@@ -1119,6 +1136,8 @@ function App() {
     setChatMessages(session.messages);
     setChatHistory(session.chatHistory);
     setAgentNotes(session.agentNotes ?? '');
+    setReceivedTips([]);
+    setExpandedTips(new Set());
     setExpandedNotes(new Set());
     setToggledNotices(new Set());
     setAssistantMode(session.mode);
@@ -1516,6 +1535,14 @@ function App() {
       if (message && message.trim()) {
         updateSessionMessages(sessionId, prev => [...prev, { role: 'warning', text: message.trim() }]);
       }
+    });
+    return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.api?.onAgentTip((_event: any, sessionId: string, tip: { id: string; auto: boolean; description: string; text: string }) => {
+      if (sessionId !== currentSessionIdRef.current) return;
+      setReceivedTips(prev => [...prev.filter(t => t.id !== tip.id), tip]);
     });
     return () => cleanup?.();
   }, []);
@@ -3312,6 +3339,55 @@ function App() {
                 </button>
               </div>
             </div>
+            {assistantMode === 'agent' && !showSessionHistory && receivedTips.length > 0 && (
+              <div className="agent-notepad">
+                <button
+                  type="button"
+                  className="agent-notepad-toggle"
+                  onClick={() => setIsTipsOpen(open => !open)}
+                  aria-expanded={isTipsOpen}
+                >
+                  <span className="material-symbols-outlined agent-notepad-icon">lightbulb</span>
+                  <span className="agent-notepad-title">Received tips</span>
+                  <span className="agent-notepad-count">{receivedTips.length}</span>
+                  <span className={`agent-group-chevron${isTipsOpen ? ' agent-group-chevron-expanded' : ''}`}>
+                    <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                      <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+                </button>
+                {isTipsOpen && (
+                  <div className="agent-notepad-list">
+                    {receivedTips.map(tip => {
+                      const isOpen = expandedTips.has(tip.id);
+                      return (
+                        <button
+                          key={tip.id}
+                          type="button"
+                          className={`agent-note${isOpen ? ' agent-note-open' : ''}`}
+                          onClick={() => setExpandedTips(prev => {
+                            const next = new Set(prev);
+                            if (!next.delete(tip.id)) next.add(tip.id);
+                            return next;
+                          })}
+                          aria-expanded={isOpen}
+                        >
+                          <span className="agent-note-text">
+                            <span className="agent-tip-source">{tip.auto ? 'Auto-sent' : 'Requested'}</span>
+                            {isOpen ? tip.text : tip.description}
+                          </span>
+                          <span className={`agent-group-chevron${isOpen ? ' agent-group-chevron-expanded' : ''}`}>
+                            <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                              <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
             {assistantMode === 'agent' && !showSessionHistory && agentNotes.trim() && (() => {
               const notes = agentNotes
                 .split('\n')

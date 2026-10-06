@@ -2,13 +2,17 @@ import { webContents as allWebContents, screen as electronScreen } from "electro
 import { getMainWindow } from "../windows";
 import { processScreenshotForAgent } from "./screenshotProcessor";
 import {
+    armPageChangeWatch,
     confirmLabeledClick,
     drawElementLabels,
     extractInteractiveElements,
     formatElementList,
     resolveLabeledElementPoint,
+    stopPageChangeWatch,
+    waitForPageChange,
     type LabeledElement,
     type LabelMap,
+    type ResolvedLabelPoint,
 } from "./elementLabeler";
 import { pressKeyInBackground, scrollInBackground, typeInBackground } from "./backgroundInput";
 import { GRID_MODE_TOOLS } from "./gridTools";
@@ -25,7 +29,23 @@ type TargetingMode = "labels" | "grid";
 const TARGETING_MODE: TargetingMode = "labels";
 
 const agentPrompt = readFileSync(join(__dirname, TARGETING_MODE === "labels" ? "prompts/agent-prompt.md" : "prompts/agent-prompt-grid.md"), "utf-8");
-const plannerPrompt = readFileSync(join(__dirname, "prompts/planner-prompt.md"), "utf-8");
+
+/** Task-specific tips, kept out of the main prompt and sent only while they apply (see tipsContext). */
+interface TaskTip { id: string; description: string; text: string }
+const taskTips: TaskTip[] = readFileSync(join(__dirname, "prompts/task-tips.md"), "utf-8")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .split(/^## /m)
+    .slice(1)
+    .map(section => {
+        const [header, ...body] = section.split("\n");
+        const [id, description = ""] = header.split("|");
+        return {
+            id: id.trim(),
+            description: description.trim(),
+            text: body.join("\n").trim(),
+        };
+    });
+const plannerPrompt =readFileSync(join(__dirname, "prompts/planner-prompt.md"), "utf-8");
 const completionCheckPrompt = readFileSync(join(__dirname, "prompts/completion-check-prompt.md"), "utf-8");
 const supervisorPrompt = readFileSync(join(__dirname, TARGETING_MODE === "labels" ? "prompts/supervisor-prompt.md" : "prompts/supervisor-prompt-grid.md"), "utf-8");
 
@@ -152,7 +172,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         throwIfStopped();
     }
 
-    async function planTask(userPrompt: string): Promise<{ complexity: string; tasks?: string[] } | null> {
+    async function planTask(userPrompt: string): Promise<{ complexity: string; tasks?: string[]; notes_edits?: unknown } | null> {
         throwIfStopped();
         pendingFetchAbortController = new AbortController();
         let response: Response;
@@ -197,7 +217,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             } else {
                 replyStr = JSON.stringify(data.reply);
             }
-            return JSON.parse(replyStr) as { complexity: string; tasks?: string[] };
+            return JSON.parse(replyStr) as { complexity: string; tasks?: string[]; notes_edits?: unknown };
         } catch (e) {
             console.error("Failed to parse planner reply:", e);
             return null;
@@ -228,8 +248,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 `Current macro task: ${JSON.stringify(currentTask)}`,
                                 `Full plan: ${JSON.stringify(plan.tasks)}`,
                                 `Recent actions: ${JSON.stringify(recentActions)}`,
-                                `Agent's notepad (its short-term memory): ${agentNotes ? JSON.stringify(agentNotes.slice(0, NOTES_INLINE_LIMIT)) : "(empty)"}`,
-                                "Determine if the actions indicate abnormal repetition. If yes, return a refined prompt for only the current macro task."
+                                `Agent's notepad (its short-term memory):\n${agentNotes || "(empty)"}`,
+                                "Determine if the actions indicate abnormal repetition. If yes, return a refined prompt for only the current macro task. If the notepad is wrong, stale or missing something that keeps the agent stuck, fix it with notes_edits."
                             ].join("\n")
                         }
                     ],
@@ -262,7 +282,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             } else {
                 replyStr = JSON.stringify(data.reply);
             }
-            return JSON.parse(replyStr) as { abnormal_repetition: boolean; refined_prompt?: string };
+            return JSON.parse(replyStr) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
         } catch (e) {
             console.error("Failed to parse supervisor reply:", e);
             return null;
@@ -332,6 +352,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         }
 
         console.log("Planner result:", plannerResult);
+        applyNotesEdits(plannerResult.notes_edits, "planner");
 
         if (plannerResult.complexity === "complex") {
             console.log("Planner determined the task is complex.");
@@ -380,6 +401,102 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         if (firstBreak !== -1 && firstBreak < tail.length - 1) tail = tail.slice(firstBreak + 1);
         const hidden = agentNotes.length - tail.length;
         return `${header}[${hidden} characters of older notes hidden — call read_notes to see everything, or tidy up with write_notes mode "replace"]\n${tail}${footer}`;
+    }
+
+    /** Tip topics the agent asked for with get_tips; they stay on for the rest of the run. */
+    const requestedTips = new Set<string>();
+    /** Tip the decision model picked for the current situation; null if it picked none or couldn't be reached. */
+    let autoTipId: string | null = null;
+    /** Tips included in the previous step, so the UI is told only when a tip newly arrives. */
+    let tipsSentLastStep = new Set<string>();
+    let lastDecisionHost: string | undefined;
+    let stepsSinceDecision = Infinity;
+    /** How often the decision model is asked again on the same site (it is always asked again when the site changes). */
+    const TIP_DECISION_EVERY_STEPS = 4;
+
+    /**
+     * Asks the backend's decision model (Jev, via the dispatcher role) whether one of the tips fits
+     * the current situation. Runs when the site changes and every few steps after that; never throws,
+     * and a failure just means no automatic tip.
+     */
+    async function decideAutoTip(userPrompt: string, currentUrl?: string): Promise<void> {
+        if (taskTips.length === 0) return;
+        let host: string | undefined;
+        try { host = currentUrl ? new URL(currentUrl).hostname : undefined; } catch { /* not a URL */ }
+        stepsSinceDecision++;
+        if (host === lastDecisionHost && stepsSinceDecision < TIP_DECISION_EVERY_STEPS) return;
+        lastDecisionHost = host;
+        stepsSinceDecision = 0;
+        try {
+            const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    agentRole: "dispatcher",
+                    state: {
+                        task: userPrompt,
+                        current_url: currentUrl ?? "",
+                        recent_actions: past_actions.slice(-5).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
+                        agent_notepad: agentNotes.slice(-1500),
+                    },
+                    questions: {
+                        tip: {
+                            type: "choice",
+                            instructions: "A browser agent is working on the task described in the state. Choose the one tip that would clearly help it with what it is doing or stuck on right now, or none if no tip clearly applies. Prefer none over a tip that is only loosely related.",
+                            criteria: {
+                                none: "No tip clearly applies to the current situation.",
+                                ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
+                            },
+                        },
+                    },
+                }),
+                signal: AbortSignal.timeout(5000),
+            });
+            if (!response.ok) throw new Error(`dispatcher returned ${response.status}`);
+            const choice = (await response.json())?.answers?.tip?.choice;
+            autoTipId = taskTips.some(t => t.id === choice) ? choice : null;
+            console.log(`[Agent] tip decision: ${autoTipId ?? "none"}`);
+        } catch (error) {
+            console.warn("[Agent] tip decision failed:", error);
+            autoTipId = null;
+        }
+    }
+
+    /**
+     * Task-specific tips for this step: the one the decision model picked, plus any the agent
+     * asked for by name. Automatic ones are labelled as such. Tips not shown yet are listed by id
+     * and description, so the agent can request one with get_tips.
+     */
+    function tipsContext(): string {
+        const requested = taskTips.filter(tip => requestedTips.has(tip.id));
+        const automatic = taskTips.filter(tip => !requestedTips.has(tip.id) && tip.id === autoTipId);
+        const available = taskTips.filter(tip => !requested.includes(tip) && !automatic.includes(tip));
+        // Tell the UI about a tip the first time it's sent (and again if it was dropped and comes back).
+        const sentNow = new Map<string, boolean>([...requested.map(t => [t.id, false] as const), ...automatic.map(t => [t.id, true] as const)]);
+        for (const [id, auto] of sentNow) {
+            if (!tipsSentLastStep.has(id)) {
+                const tip = taskTips.find(t => t.id === id)!;
+                emit("agent:tip", { id, auto, description: tip.description, text: tip.text });
+            }
+        }
+        tipsSentLastStep = new Set(sentNow.keys());
+        let out = "";
+        if (requested.length > 0) out += `\n\n=== TIPS YOU ASKED FOR ===\n${requested.map(t => t.text).join("\n\n")}\n=== END OF TIPS ===`;
+        if (automatic.length > 0) {
+            out += `\n\n=== AUTOMATICALLY ADDED TIP — a helper picked this for you; you did not ask for it, and it may or may not be useful. Use it only if it fits what you are doing, otherwise ignore it. ===\n${automatic.map(t => t.text).join("\n\n")}\n=== END OF TIP ===`;
+        }
+        if (available.length > 0) {
+            out += `\n\nMore tips are available — call get_tips with the topic if one fits what you're stuck on:\n${available.map(t => `- ${t.id}: ${t.description}`).join("\n")}`;
+        }
+        return out;
+    }
+
+    /** get_tips tool: turn on a tip topic by id (or list the topics). Returns the result shown to the model. */
+    function applyGetTips(topic: string): string {
+        const tip = taskTips.find(t => t.id === topic.trim().toLowerCase());
+        if (!tip) return `no tip topic "${topic}". Available: ${taskTips.map(t => t.id).join(", ")}`;
+        requestedTips.add(tip.id);
+        return `tip "${tip.id}" is included in your next steps`;
     }
 
     /**
@@ -471,6 +588,64 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             : `saved; notepad is now ${agentNotes.length} chars`;
     }
 
+    const PLAN_HEADER = "PLAN (steps are ticked off as they're finished):";
+
+    /**
+     * Writes a new plan checklist into the notepad. A new plan covers everything still left
+     * (the planner sees the old one), so it takes the place of any earlier PLAN: the earlier
+     * unfinished steps are dropped and only its finished ones are kept, as a record of what's done.
+     */
+    function writePlanToNotes(tasks: string[]): void {
+        const planText = `${PLAN_HEADER}\n${tasks.map((t, i) => `[ ] ${i + 1}. ${t}`).join("\n")}`;
+        const kept: string[] = [];
+        let insertAt = -1;
+        let inPlan = false;
+        for (const line of agentNotes.split("\n")) {
+            if (line.trim().startsWith("PLAN (")) {
+                if (insertAt === -1) insertAt = kept.length;
+                inPlan = true;
+                continue;
+            }
+            // Old checklist lines go, wherever they ended up; finished ones are kept as plain history.
+            const step = line.match(/^\s*\[([ x\-])\]\s*\d+\.\s*(.*)$/i);
+            if (inPlan && step) {
+                if (step[1].toLowerCase() === "x") kept.push(`Done earlier: ${step[2]}`);
+                continue;
+            }
+            if (inPlan && !line.trim()) continue;
+            kept.push(line);
+        }
+        if (insertAt === -1) {
+            applyNotesCommand({ type: "agent:write_notes", mode: "append", text: planText });
+            return;
+        }
+        kept.splice(insertAt, 0, planText);
+        applyNotesCommand({ type: "agent:write_notes", mode: "replace", text: kept.join("\n").trim() });
+    }
+
+    /**
+     * Applies the `notes_edits` the planner or supervisor returned, so they can fix the agent's
+     * notepad too (tick off steps, correct a wrong fact, drop a stale plan). Each edit is
+     * { mode: "append" | "edit" | "replace", text, find? }; appended lines are tagged with who wrote them.
+     */
+    function applyNotesEdits(edits: unknown, source: "planner" | "supervisor"): void {
+        if (!Array.isArray(edits)) return;
+        for (const edit of edits) {
+            if (!edit || typeof edit !== "object") continue;
+            const { mode, text, find } = edit as { mode?: unknown; text?: unknown; find?: unknown };
+            const safeMode = mode === "edit" || mode === "replace" ? mode : "append";
+            const safeText = typeof text === "string" ? text : "";
+            if (safeMode === "append" && !safeText.trim()) continue;
+            const result = applyNotesCommand({
+                type: "agent:write_notes",
+                mode: safeMode,
+                text: safeMode === "append" ? `(${source}) ${safeText}` : safeText,
+                find: typeof find === "string" ? find : undefined,
+            });
+            console.log(`[Agent] ${source} notepad ${safeMode}: ${result}`);
+        }
+    }
+
     type ScrollPosition = { y: number; viewport: number; height: number; inner: boolean };
 
     /**
@@ -536,6 +711,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         const elementsContext = elements
             ? `\nInteractive elements on screen (label, element):\n${formatElementList(elements)}`
             : "";
+        await decideAutoTip(userPrompt, currentUrl);
+        throwIfStopped();
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
@@ -552,7 +729,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         ...(past_actions.length > 0
                             ? [{ role: "system", content: "Previous actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n") }]
                             : []),
-                        { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${tabsContext}${elementsContext}${notesContext()}` }
+                        { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}` }
                     ],
                     ...(imageurl ? { imageUrl: imageurl } : {}),
                     // The backend's default tools are label-based; grid mode overrides them.
@@ -795,7 +972,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         }
         let processedBase64: string;
         if (TARGETING_MODE === "labels") {
-            processedBase64 = await drawElementLabels(rawBase64, elements, w / winW);
+            processedBase64 = await drawElementLabels(rawBase64, elements, w / winW, lastCursorPos);
         } else {
             // Scale last click position from webview CSS pixels to resized-screenshot pixels.
             const cursorInShot = lastCursorPos
@@ -1021,10 +1198,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             const isRendererSurface = webviewInfo.kind === "renderer";
             let relX: number;
             let relY: number;
+            let resolved: ResolvedLabelPoint | null = null;
             if (cmd.label !== undefined) {
                 // Label clicks already target a hit-tested point inside the element; re-resolve
                 // it in case the layout shifted since the screenshot, otherwise use the stored point.
-                const resolved = await resolveLabeledElementPoint(currentLabels, cmd.label);
+                resolved = await resolveLabeledElementPoint(currentLabels, cmd.label);
                 relX = resolved?.x ?? cmd.x;
                 relY = resolved?.y ?? cmd.y;
             } else {
@@ -1085,35 +1263,73 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             // (unzoomed) pixel space — scaling those by the display factor sends the native
             // event to the wrong on-screen pixel. Note that's only the guest page's CSS-pixel
             // space at zoom 100%.
-            const eventX = isRendererSurface ? Math.round(webviewInfo.x + relX) : relX;
-            const eventY = isRendererSurface ? Math.round(webviewInfo.y + relY) : relY;
-            let physX = eventX;
-            let physY = eventY;
-            if (isRendererSurface) {
+            const toEventPoint = (rx: number, ry: number) => {
+                const ex = isRendererSurface ? Math.round(webviewInfo.x + rx) : rx;
+                const ey = isRendererSurface ? Math.round(webviewInfo.y + ry) : ry;
+                if (!isRendererSurface) return { eventX: ex, eventY: ey, physX: ex, physY: ey };
                 const winBounds = getMainWindow()?.getBounds();
                 const display = winBounds
                     ? electronScreen.getDisplayNearestPoint({ x: winBounds.x, y: winBounds.y })
                     : electronScreen.getPrimaryDisplay();
                 const sf = display.scaleFactor ?? 1;
-                physX = Math.round(eventX * sf);
-                physY = Math.round(eventY * sf);
-            }
-
+                return { eventX: ex, eventY: ey, physX: Math.round(ex * sf), physY: Math.round(ey * sf) };
+            };
             // Native input events — these are trusted (isTrusted=true) and work on
             // all sites including those that reject synthetic JS events.
-            webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: physX, y: physY });
-            for (let i = 1; i <= clickCount; i++) {
-                webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: physX, y: physY, button: 'left', clickCount: i });
-                await sleepInterruptible(i === 1 && clickCount === 1 ? 80 : 40, 20);
-                webviewInfo.wc.sendInputEvent({ type: 'mouseUp', x: physX, y: physY, button: 'left', clickCount: i });
-            }
+            const nativeClick = async (px: number, py: number) => {
+                webviewInfo.wc.sendInputEvent({ type: 'mouseMove', x: px, y: py });
+                for (let i = 1; i <= clickCount; i++) {
+                    webviewInfo.wc.sendInputEvent({ type: 'mouseDown', x: px, y: py, button: 'left', clickCount: i });
+                    await sleepInterruptible(i === 1 && clickCount === 1 ? 80 : 40, 20);
+                    webviewInfo.wc.sendInputEvent({ type: 'mouseUp', x: px, y: py, button: 'left', clickCount: i });
+                }
+            };
+            const { eventX, eventY, physX, physY } = toEventPoint(relX, relY);
 
             if (cmd.label !== undefined) {
-                // Give the renderer time to dispatch the trusted click, then JS-click the
-                // labelled element only if that click never reached it.
-                await sleepInterruptible(150, 50);
-                const landed = await confirmLabeledClick(currentLabels, cmd.label);
-                if (!landed) console.log(`[Agent] Native click missed label ${cmd.label}; clicked it from JS instead.`);
+                // If the click doesn't visibly do anything, retry once dead centre — the
+                // hit-tested point can land on an edge that looks like the control but isn't.
+                const center = resolved && resolved.retryable &&
+                    Math.hypot(resolved.centerX - relX, resolved.centerY - relY) > 3
+                    ? { x: resolved.centerX, y: resolved.centerY } : null;
+                let tabCountBefore = -1;
+                let navigated = false;
+                const onNavigate = () => { navigated = true; };
+                if (center) {
+                    await armPageChangeWatch(currentLabels, cmd.label);
+                    tabCountBefore = (await tabs.listTabs().catch(() => [])).length;
+                    webviewInfo.wc.on('did-start-navigation', onNavigate);
+                }
+                try {
+                    await nativeClick(physX, physY);
+                    // Give the renderer time to dispatch the trusted click, then JS-click the
+                    // labelled element only if that click never reached it.
+                    await sleepInterruptible(150, 50);
+                    const landed = await confirmLabeledClick(currentLabels, cmd.label);
+                    console.log(landed
+                        ? `[Agent] Native click reached label ${cmd.label} at ${physX},${physY}.`
+                        : `[Agent] Native click missed label ${cmd.label} at ${physX},${physY}; clicked it from JS instead.`);
+
+                    if (center) {
+                        // Network-backed actions (add to cart) usually show a spinner or
+                        // disable the button right away, so 1s is plenty to see *something*.
+                        const changed = navigated || await waitForPageChange(currentLabels, cmd.label, 1000) || navigated;
+                        const tabOpened = !changed && (await tabs.listTabs().catch(() => [])).length !== tabCountBefore;
+                        if (!changed && !tabOpened) {
+                            const c = toEventPoint(center.x, center.y);
+                            console.log(`[Agent] Click on label ${cmd.label} changed nothing; retrying at its centre ${c.physX},${c.physY}.`);
+                            await nativeClick(c.physX, c.physY);
+                            relX = center.x;
+                            relY = center.y;
+                            lastCursorPos = { x: relX, y: relY };
+                        }
+                    }
+                } finally {
+                    if (center) {
+                        webviewInfo.wc.removeListener('did-start-navigation', onNavigate);
+                        await stopPageChangeWatch(currentLabels, cmd.label);
+                    }
+                }
             } else {
                 // JS fallback for React/SPA event-delegation cases where the handler lives on a
                 // container rather than the leaf element. We do NOT send extra pointer/mouse
@@ -1312,6 +1528,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             cmd = { type: "agent:write_notes", text: String(tool_arguments.text ?? ""), mode, find: typeof tool_arguments.find === "string" ? tool_arguments.find : undefined };
         } else if (tool.name === "read_notes") {
             cmd = { type: "agent:read_notes" };
+        } else if (tool.name === "get_tips") {
+            cmd = { type: "agent:get_tips", topic: String(tool_arguments.topic ?? "") };
         }
         return cmd;
     }
@@ -1591,11 +1809,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         // The plan lives in the notepad as a checklist, so it survives Stop and
                         // follow-ups: the next run (and the planner) can see what's still open.
                         if (plan.tasks.length > 1) {
-                            applyNotesCommand({
-                                type: "agent:write_notes",
-                                mode: "append",
-                                text: `PLAN (steps are ticked off as they're finished):\n${plan.tasks.map((t, i) => `[ ] ${i + 1}. ${t}`).join("\n")}`,
-                            });
+                            writePlanToNotes(plan.tasks);
                         }
                     }
                     break;
@@ -1794,6 +2008,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                             continue;
                         }
 
+                        if (cmd.type === "agent:get_tips") {
+                            const tipsResult = applyGetTips(cmd.topic);
+                            console.log(`[Agent] get_tips: ${tipsResult}`);
+                            const tipsExplanation = tool_arguments.explanation || "Looked up tips.";
+                            past_actions.push({ tool: tool.name, parameters: { topic: cmd.topic }, explanation: tipsExplanation, result: tipsResult });
+                            emit("agent:action", tipsExplanation);
+                            continue;
+                        }
+
                         throwIfStopped();
 
                         console.log("Executing command:", cmd);
@@ -1870,6 +2093,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 console.log("______________________________")
                                 console.log(`Agent has executed the same action ${repetitionCount} times:`, tool_arguments);
                                 const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
+                                applyNotesEdits(supervisorResponse?.notes_edits, "supervisor");
                                 if (supervisorResponse?.abnormal_repetition) {
                                     console.log("Supervisor detected abnormal repetition.");
                                     supervisorInterventions++;

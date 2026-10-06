@@ -348,6 +348,59 @@ function buildExtractionScript(clip: { left: number; top: number; right: number;
             const stored = [];
             const storedSet = new Set();
             const out = [];
+            // Pass-through item -> the clickable container that actually receives its clicks.
+            const proxies = new Map();
+
+            const hasPaint = (n, cs) => {
+                const tag = n.tagName.toLowerCase();
+                if (tag === 'img' || tag === 'svg' || tag === 'canvas' || tag === 'video') return true;
+                if (cs.backgroundImage && cs.backgroundImage !== 'none') return true;
+                const bg = cs.backgroundColor || '';
+                return bg !== 'transparent' && !/rgba\\([^)]*,\\s*0\\)$/.test(bg);
+            };
+
+            // Boards, maps and editors often draw their items as plain elements and work out
+            // what was clicked from the coordinates, with one listener on the container
+            // (e.g. lichess's chessground: <piece>s and move-dest <square>s inside a
+            // listening <cg-board>). The items have no handler of their own — some don't even
+            // hit-test (pointer-events: none) — so label each painted one as its own target;
+            // a click at its centre reaches the container, which is what the page expects.
+            const addPassThroughItems = (container, crect) => {
+                const containerArea = crect.width * crect.height;
+                const added = new Set();
+                const nodes = container.querySelectorAll('*');
+                for (let i = 0; i < nodes.length && i < 3000 && added.size < 150; i++) {
+                    const n = nodes[i];
+                    if (storedSet.has(n) || added.has(getParent(n))) continue;
+                    const cs = getComputedStyle(n);
+                    if (cs.visibility !== 'visible' || cs.display === 'none' || parseFloat(cs.opacity) === 0) continue;
+                    const r = n.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8 || r.width * r.height > 0.25 * containerArea) continue;
+                    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                    if (cx < CLIP.left || cx >= CLIP.right || cy < CLIP.top || cy >= CLIP.bottom) continue;
+                    if (!hasPaint(n, cs)) continue;
+                    // Controls of their own are labelled by the main walk.
+                    if (classify(n, cs)) continue;
+                    const under = deepElementFromPoint(document, cx, cy);
+                    if (!under || !composedContains(container, under)) continue; // covered by something else
+                    // An item that does hit-test must be what's on top at its centre, so its
+                    // click bubbles to the container from the item itself.
+                    if (cs.pointerEvents !== 'none' && !composedContains(n, under)) continue;
+                    added.add(n);
+                    out.push({
+                        index: stored.length,
+                        weak: false,
+                        x: Math.max(r.left, CLIP.left), y: Math.max(r.top, CLIP.top),
+                        w: Math.min(r.right, CLIP.right) - Math.max(r.left, CLIP.left),
+                        h: Math.min(r.bottom, CLIP.bottom) - Math.max(r.top, CLIP.top),
+                        cx, cy,
+                        description: describe(n),
+                    });
+                    stored.push(n);
+                    storedSet.add(n);
+                    proxies.set(n, container);
+                }
+            };
 
             const stack = [document.documentElement];
             while (stack.length) {
@@ -415,8 +468,13 @@ function buildExtractionScript(clip: { left: number; top: number; right: number;
                 });
                 stored.push(target);
                 storedSet.add(target);
+                // Only script-driven surfaces: inside a native link or button (a big product card,
+                // say) every painted child would just be a duplicate of the whole.
+                const nativeControl = NATIVE_TAGS.has(target.tagName.toLowerCase()) || (target.tagName === 'A' && target.hasAttribute('href'));
+                if (rect.width >= 150 && rect.height >= 150 && !nativeControl) addPassThroughItems(target, rect);
             }
             window.__indusAgentEls = stored;
+            window.__indusAgentProxies = proxies;
 
             // Visible content box of each child frame, in this frame's coordinates.
             const frames = {};
@@ -571,10 +629,22 @@ export async function extractInteractiveElements(
  * actually reaches the element (see confirmLabeledClick).
  * Returns the point in surface px, or null if the element is gone.
  */
-export async function resolveLabeledElementPoint(labels: LabelMap, label: string): Promise<{ x: number; y: number } | null> {
+export type ResolvedLabelPoint = {
+    /** Hit-tested click point, surface px. */
+    x: number;
+    y: number;
+    /** Geometric centre of the element, surface px — the retry point if the first click does nothing. */
+    centerX: number;
+    centerY: number;
+    /** False for controls where a second click could undo or repeat the first one's
+     * invisible effect (native dropdowns, media, new-tab links, text fields). */
+    retryable: boolean;
+};
+
+export async function resolveLabeledElementPoint(labels: LabelMap, label: string): Promise<ResolvedLabelPoint | null> {
     const entry = labels.get(label);
     if (!entry) return null;
-    const result = await runInFrame<{ x: number; y: number }>(entry.frame, `
+    const result = await runInFrame<{ x: number; y: number; cx: number; cy: number; retryable: boolean; debug: string }>(entry.frame, `
         (() => {
             ${PAGE_HELPERS}
             const el = (window.__indusAgentEls || [])[${entry.index}];
@@ -586,21 +656,166 @@ export async function resolveLabeledElementPoint(labels: LabelMap, label: string
             }
             const prev = window.__indusClickProbe;
             if (prev) for (const type of ['pointerdown', 'mousedown', 'click']) prev.el.removeEventListener(type, prev.handler, true);
-            const hit = findHitPoint(el, rect, document, null);
+            // A pass-through item (see addPassThroughItems): aim at its centre, and treat its
+            // container as the element being clicked — that's where the events go.
+            const proxy = window.__indusAgentProxies && window.__indusAgentProxies.get(el);
+            let hit;
+            if (proxy && proxy.isConnected) {
+                const c = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+                const atCentre = deepElementFromPoint(document, c.x, c.y);
+                hit = atCentre && composedContains(proxy, atCentre) ? c : null;
+            } else {
+                hit = findHitPoint(el, rect, document, null);
+            }
             const point = { x: hit ? hit.x : rect.left + rect.width / 2, y: hit ? hit.y : rect.top + rect.height / 2 };
+            point.cx = rect.left + rect.width / 2;
+            point.cy = rect.top + rect.height / 2;
+            const tag = el.tagName.toLowerCase();
+            const type = (el.getAttribute('type') || '').toLowerCase();
+            point.retryable = !(
+                ['select', 'option', 'textarea', 'video', 'audio'].includes(tag) ||
+                (tag === 'input' && !['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(type)) ||
+                el.isContentEditable ||
+                (el.closest && el.closest('a[target="_blank"], a[download]')) ||
+                (el.querySelector && el.querySelector('video, audio'))
+            );
             // Any trusted press/click inside el counts: some controls act on mousedown.
-            const probe = { el, point, reached: false, handler: null };
-            probe.handler = (e) => { if (e.isTrusted) probe.reached = true; };
-            for (const type of ['pointerdown', 'mousedown', 'click']) el.addEventListener(type, probe.handler, true);
+            const probeEl = proxy && proxy.isConnected ? proxy : el;
+            const probe = { el: probeEl, point, reached: false, handler: null };
+            probe.handler = (e) => {
+                if (!e.isTrusted) return;
+                // On a container, only a press inside the item's own box counts.
+                if (probeEl !== el && (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom)) return;
+                probe.reached = true;
+            };
+            for (const type of ['pointerdown', 'mousedown', 'click']) probeEl.addEventListener(type, probe.handler, true);
             window.__indusClickProbe = probe;
+            // Diagnostics: what we're aiming at, and what's actually under the point.
+            const name = (n) => n ? n.tagName.toLowerCase() + (n.id ? '#' + n.id : '') +
+                (typeof n.className === 'string' && n.className.trim() ? '.' + n.className.trim().split(/\\s+/).slice(0, 3).join('.') : '') : 'none';
+            const under = deepElementFromPoint(document, point.x, point.y);
+            const r = (v) => Math.round(v);
+            point.debug = name(el) + ' "' + (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 30) + '"' +
+                ' rect=' + [r(rect.left), r(rect.top), r(rect.width), r(rect.height)].join(',') +
+                ' point=' + r(point.x) + ',' + r(point.y) + (hit ? '' : ' (no hit point, using centre)') +
+                ' under=' + name(under) + (proxy ? ' via ' + name(proxy) : '') + (under && composedContains(probeEl, under) ? ' (inside)' : ' (OUTSIDE)') +
+                ' dpr=' + window.devicePixelRatio + ' inner=' + window.innerWidth + 'x' + window.innerHeight;
             return point;
         })()
     `);
-    if (!result || typeof result.x !== "number" || typeof result.y !== "number") return null;
-    return {
+    if (!result || typeof result.x !== "number" || typeof result.y !== "number") {
+        console.log(`[Agent] Label ${label}: element gone or unreachable; using the extraction-time point.`);
+        return null;
+    }
+    const out: ResolvedLabelPoint = {
         x: Math.round((result.x + entry.ox) * entry.scale),
         y: Math.round((result.y + entry.oy) * entry.scale),
+        centerX: Math.round((result.cx + entry.ox) * entry.scale),
+        centerY: Math.round((result.cy + entry.oy) * entry.scale),
+        retryable: result.retryable === true,
     };
+    console.log(`[Agent] Label ${label} → ${result.debug} → surface ${out.x},${out.y} (scale ${entry.scale}, offset ${entry.ox},${entry.oy})`);
+    return out;
+}
+
+/** Shared by the arm/check scripts of the page-change watch. */
+const CHANGE_HELPERS = `
+    // Checked/value state of el and the form controls in or behind it — toggles that leave no DOM mutation.
+    const formState = (el) => {
+        if (!el || !el.isConnected) return '';
+        const nodes = [el, el.control, ...(el.querySelectorAll ? el.querySelectorAll('input, select, textarea') : [])].filter(Boolean).slice(0, 8);
+        return nodes.map(n => (n.checked ? '1' : '0') + ':' + (n.value ?? '') + ':' + (n.selectedIndex ?? '')).join('|');
+    };
+    const isEditable = (n) => !!n && (n.isContentEditable || n.tagName === 'INPUT' || n.tagName === 'TEXTAREA');
+`;
+
+/**
+ * Starts recording whether the page reacts to the upcoming click on `label`:
+ * DOM mutations (in the element's frame and the top frame, open shadow roots
+ * included), navigation, scrolling, focus moving into a text field, or a
+ * checkbox/value change. Class/style flips on the element itself and its
+ * ancestors/descendants are ignored — they're usually just hover styling from
+ * the pointer arriving. Call after resolveLabeledElementPoint (which arms the
+ * click probe this reads the element from).
+ */
+export async function armPageChangeWatch(labels: LabelMap, label: string): Promise<void> {
+    const entry = labels.get(label);
+    if (!entry) return;
+    const script = `
+        (() => {
+            ${PAGE_HELPERS}
+            ${CHANGE_HELPERS}
+            if (window.__indusChange) window.__indusChange.obs.disconnect();
+            const probe = window.__indusClickProbe;
+            const el = probe ? probe.el : null;
+            const state = {
+                count: 0, url: location.href, active: document.activeElement,
+                sx: window.scrollX, sy: window.scrollY, el, form: formState(el),
+            };
+            state.obs = new MutationObserver((list) => {
+                for (const m of list) {
+                    if (m.type === 'attributes' && (m.attributeName === 'class' || m.attributeName === 'style') &&
+                        el && m.target.nodeType === 1 && (composedContains(m.target, el) || composedContains(el, m.target))) continue;
+                    state.count++;
+                }
+            });
+            const opts = { subtree: true, childList: true, characterData: true, attributes: true };
+            state.obs.observe(document, opts);
+            // A document observer doesn't see into shadow roots; observe those too.
+            const stack = [document.documentElement];
+            let roots = 0;
+            while (stack.length && roots < 300) {
+                const n = stack.pop();
+                if (!n || n.nodeType !== 1) continue;
+                const root = getShadowRoot(n);
+                if (root) { state.obs.observe(root, opts); roots++; for (const k of root.children) stack.push(k); }
+                for (const k of n.children) stack.push(k);
+            }
+            window.__indusChange = state;
+            return true;
+        })()
+    `;
+    const frames = [...new Set([entry.frame, entry.frame.top ?? entry.frame])];
+    await Promise.all(frames.map(f => runInFrame(f, script)));
+}
+
+/**
+ * Polls until the page shows a reaction to the click (see armPageChangeWatch)
+ * or `timeoutMs` passes. A frame that can't be queried — navigated away,
+ * detached, or busy — counts as changed, so uncertainty never causes a second click.
+ */
+export async function waitForPageChange(labels: LabelMap, label: string, timeoutMs: number): Promise<boolean> {
+    const entry = labels.get(label);
+    if (!entry) return true;
+    const frames = [...new Set([entry.frame, entry.frame.top ?? entry.frame])];
+    const check = `
+        (() => {
+            ${CHANGE_HELPERS}
+            const s = window.__indusChange;
+            if (!s) return true; // a new document
+            const a = document.activeElement;
+            return s.count > 0 || location.href !== s.url ||
+                Math.abs(window.scrollX - s.sx) > 2 || Math.abs(window.scrollY - s.sy) > 2 ||
+                (a !== s.active && isEditable(a)) || (s.el ? formState(s.el) !== s.form : false);
+        })()
+    `;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const results = await Promise.all(frames.map(f => f.detached ? null : runInFrame<boolean>(f, check)));
+        if (results.some(r => r !== false)) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise<void>(resolve => setTimeout(resolve, 100));
+    }
+}
+
+/** Disconnects the observers armPageChangeWatch set up. */
+export async function stopPageChangeWatch(labels: LabelMap, label: string): Promise<void> {
+    const entry = labels.get(label);
+    if (!entry) return;
+    const frames = [...new Set([entry.frame, entry.frame.top ?? entry.frame])];
+    await Promise.all(frames.map(f => f.detached ? null : runInFrame(f, `
+        (() => { if (window.__indusChange) { window.__indusChange.obs.disconnect(); window.__indusChange = null; } return true; })()
+    `)));
 }
 
 /**
@@ -657,11 +872,13 @@ const TAG_FONT_SIZE = 12;
 const TAG_HEIGHT = 15;
 
 /** Draws a coloured box and a numbered tag over every element. `scale` maps
- * surface pixels to screenshot pixels. */
+ * surface pixels to screenshot pixels. `cursor`, in surface pixels, marks where
+ * the agent last clicked. */
 export async function drawElementLabels(
     base64Image: string,
     elements: LabeledElement[],
-    scale: number
+    scale: number,
+    cursor?: { x: number; y: number } | null
 ): Promise<string> {
     const raw = base64Image.replace(/^data:image\/\w+;base64,/, "");
     if (!raw) throw new Error("drawElementLabels: base64Image is empty");
@@ -697,7 +914,23 @@ export async function drawElementLabels(
     });
 
     // Tags drawn after all boxes so no box outline crosses a number.
-    const svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${boxes}${tags}</svg>`;
+    // Cursor marker last, thin and hollow so it doesn't hide the element under it.
+    let cursorMark = "";
+    if (cursor) {
+        const cx = Math.round(cursor.x * scale);
+        const cy = Math.round(cursor.y * scale);
+        if (cx >= 0 && cy >= 0 && cx < W && cy < H) {
+            const R = 10;
+            const arm = R + 8;
+            const cross = (stroke: string, width: number) =>
+                `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="${stroke}" stroke-width="${width}"/>` +
+                `<line x1="${cx - arm}" y1="${cy}" x2="${cx + arm}" y2="${cy}" stroke="${stroke}" stroke-width="${width}"/>` +
+                `<line x1="${cx}" y1="${cy - arm}" x2="${cx}" y2="${cy + arm}" stroke="${stroke}" stroke-width="${width}"/>`;
+            cursorMark = cross("#000000", 4) + cross("#ff2222", 2) + `<circle cx="${cx}" cy="${cy}" r="2.5" fill="#ff2222"/>`;
+        }
+    }
+
+    const svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${boxes}${tags}${cursorMark}</svg>`;
     const outputBuf = await sharp(buf)
         .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
         .jpeg({ quality: 70 })

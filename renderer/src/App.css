@@ -1607,6 +1607,16 @@
   margin-top: 5px;
 }
 
+.agent-tip-source {
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #27272a;
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
 .agent-control-row {
   display: flex;
   align-items: center;

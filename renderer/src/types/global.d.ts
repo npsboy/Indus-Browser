@@ -83,6 +83,7 @@ declare global {
       onAgentDone: (callback: (_event: any, sessionId: string, answer: string) => void) => (() => void);
       onAgentWarn: (callback: (_event: any, sessionId: string, message: string) => void) => (() => void);
       onAgentSupervisor: (callback: (_event: any, sessionId: string, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) => (() => void);
+      onAgentTip: (callback: (_event: any, sessionId: string, tip: { id: string; auto: boolean; description: string; text: string }) => void) => (() => void);
       onAgentNotes: (callback: (_event: any, sessionId: string, notes: string) => void) => (() => void);
       onOpenUrlInNewTab: (callback: (_event: any, url: string, info?: { disposition?: string; openerId?: number }) => void) => (() => void);
       chatRequest: (payload: any) => Promise<any>;
