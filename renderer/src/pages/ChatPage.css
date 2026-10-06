@@ -8,6 +8,31 @@
   overflow: hidden;
 }
 
+.chat-page-container.entering {
+  animation: chat-page-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.chat-page-container.entering .chat-sidebar {
+  animation: chat-sidebar-enter 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes chat-page-enter {
+  from { opacity: 0; transform: translateY(14px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes chat-sidebar-enter {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-page-container.entering,
+  .chat-page-container.entering .chat-sidebar {
+    animation-duration: 0.01ms;
+  }
+}
+
 .chat-icon-btn {
   width: 32px;
   height: 32px;

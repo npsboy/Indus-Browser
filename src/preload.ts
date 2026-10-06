@@ -136,16 +136,6 @@ function showItemInFolder(filePath: string) {
   ipcRenderer.send("show-item-in-folder", filePath);
 }
 
-function onAgentNavigate(callback: (_event: any, url: string) => void) {
-  ipcRenderer.on("agent:navigate", callback);
-  return () => ipcRenderer.removeListener("agent:navigate", callback);
-}
-
-function onAgentNewTab(callback: (_event: any, url?: string) => void) {
-  ipcRenderer.on("agent:new-tab", callback);
-  return () => ipcRenderer.removeListener("agent:new-tab", callback);
-}
-
 function onAgentReloadActiveTab(callback: () => void) {
   ipcRenderer.on("agent:reload-active-tab", callback);
   return () => ipcRenderer.removeListener("agent:reload-active-tab", callback);
@@ -156,48 +146,52 @@ function onAgentCloseActiveTab(callback: () => void) {
   return () => ipcRenderer.removeListener("agent:close-active-tab", callback);
 }
 
-function onAgentSwitchToTab(callback: (_event: any, url: string) => void) {
-  ipcRenderer.on("agent:switch-to-tab", callback);
-  return () => ipcRenderer.removeListener("agent:switch-to-tab", callback);
+// Each sidebar conversation (`sessionId`) has its own agent; several can run at once.
+// `history` is the conversation before `text`; `notes` is its agent notepad. Both carry
+// over so follow-ups are read in context. Agent events below arrive tagged with the
+// sessionId they belong to.
+function runAgentInstruction(request: { sessionId: string; text: string; history?: { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor'; text: string }[]; notes?: string }): Promise<void> {
+  return ipcRenderer.invoke('agent:run-instruction', request);
 }
 
-function runAgentInstruction(instruction: string): Promise<void> {
-  return ipcRenderer.invoke('agent:run-instruction', instruction);
-}
-
-function onAgentCursorFlash(callback: (_event: any, pos: { x: number; y: number }) => void) {
+function onAgentCursorFlash(callback: (_event: any, sessionId: string, pos: { x: number; y: number }) => void) {
   ipcRenderer.on("agent:cursor-flash", callback);
   return () => ipcRenderer.removeListener("agent:cursor-flash", callback);
 }
 
-function onAgentAction(callback: (_event: any, description: string) => void) {
+function onAgentAction(callback: (_event: any, sessionId: string, description: string) => void) {
   ipcRenderer.on("agent:action", callback);
   return () => ipcRenderer.removeListener("agent:action", callback);
 }
 
-function stopAgent() {
-  ipcRenderer.send('agent:stop');
+function stopAgent(sessionId: string) {
+  ipcRenderer.send('agent:stop', sessionId);
 }
 
-function pauseAgent() {
-  ipcRenderer.send('agent:pause');
+function pauseAgent(sessionId: string) {
+  ipcRenderer.send('agent:pause', sessionId);
 }
 
-function resumeAgent() {
-  ipcRenderer.send('agent:resume');
+function resumeAgent(sessionId: string) {
+  ipcRenderer.send('agent:resume', sessionId);
 }
 
-function onAgentDone(callback: (_event: any, answer: string) => void) {
+function onAgentDone(callback: (_event: any, sessionId: string, answer: string) => void) {
   ipcRenderer.on('agent:done', callback);
   return () => ipcRenderer.removeListener('agent:done', callback);
 }
 
-function onAgentWarn(callback: (_event: any, message: string) => void) {
+function onAgentWarn(callback: (_event: any, sessionId: string, message: string) => void) {
   ipcRenderer.on('agent:warn', callback);
   return () => ipcRenderer.removeListener('agent:warn', callback);
 }
 
-function onAgentSupervisor(callback: (_event: any, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) {
+function onAgentNotes(callback: (_event: any, sessionId: string, notes: string) => void) {
+  ipcRenderer.on('agent:notes', callback);
+  return () => ipcRenderer.removeListener('agent:notes', callback);
+}
+
+function onAgentSupervisor(callback: (_event: any, sessionId: string, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) {
   ipcRenderer.on('agent:supervisor', callback);
   return () => ipcRenderer.removeListener('agent:supervisor', callback);
 }
@@ -234,6 +228,22 @@ function dispatcherRequest(text: string): Promise<any> {
     return ipcRenderer.invoke('dispatcher-request', text);
 }
 
+type LocationMask = { enabled: boolean; proxy: string };
+
+function getLocationMask(): Promise<LocationMask> {
+  return ipcRenderer.invoke("location-mask:get");
+}
+
+function setLocationMask(patch: Partial<LocationMask>): Promise<LocationMask> {
+  return ipcRenderer.invoke("location-mask:set", patch);
+}
+
+function onLocationMaskChanged(callback: (mask: LocationMask) => void) {
+  const listener = (_event: unknown, mask: LocationMask) => callback(mask);
+  ipcRenderer.on("location-mask:changed", listener);
+  return () => ipcRenderer.removeListener("location-mask:changed", listener);
+}
+
 function getSettings(): Promise<any> {
   return ipcRenderer.invoke("settings:get");
 }
@@ -258,6 +268,10 @@ function setShieldsForSite(site: string, up: boolean): Promise<any> {
 
 function classifyChatInput(text: string): Promise<any> {
     return ipcRenderer.invoke('classify-chat-input', text);
+}
+
+function generateSessionTitle(text: string): Promise<any> {
+    return ipcRenderer.invoke('session:generate-title', text);
 }
 
 contextBridge.exposeInMainWorld('api', {
@@ -286,6 +300,9 @@ contextBridge.exposeInMainWorld('api', {
     clearSiteData,
     clearAllSiteData,
     getSettings,
+    getLocationMask,
+    setLocationMask,
+    onLocationMaskChanged,
     updateSettings,
     onSettingsChanged,
     getShieldsTabState,
@@ -294,11 +311,8 @@ contextBridge.exposeInMainWorld('api', {
     onDownloadProgress,
     onDownloadDone,
     showItemInFolder,
-    onAgentNavigate,
-    onAgentNewTab,
     onAgentReloadActiveTab,
     onAgentCloseActiveTab,
-    onAgentSwitchToTab,
     runAgentInstruction,
     onAgentCursorFlash,
     onAgentAction,
@@ -308,9 +322,11 @@ contextBridge.exposeInMainWorld('api', {
     onAgentDone,
     onAgentWarn,
     onAgentSupervisor,
+    onAgentNotes,
     onOpenUrlInNewTab,
     chatRequest,
     chatStreamRequest,
     dispatcherRequest,
-    classifyChatInput
+    classifyChatInput,
+    generateSessionTitle
 });

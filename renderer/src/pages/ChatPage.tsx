@@ -123,6 +123,27 @@ function snippetFor(chat: ChatSession): string {
   return last.content.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+const TITLE_OPEN = "<title>";
+const TITLE_CLOSE = "</title>";
+const TITLE_INSTRUCTION =
+  "This is the first message of a new chat. Begin your reply with a very short title for the chat (2-5 words, no quotes or trailing punctuation) wrapped in <title></title> tags, then continue with your normal reply on the next line. The title is never shown as part of your reply.";
+
+// Splits a (possibly partial) streamed reply into the leading <title> and the visible body.
+function splitTitle(raw: string): { title: string | null; body: string } {
+  const text = raw.trimStart();
+  if (!text) return { title: null, body: "" };
+  if (!text.startsWith(TITLE_OPEN)) {
+    // Still might be the start of "<title>" arriving in pieces.
+    return TITLE_OPEN.startsWith(text) ? { title: null, body: "" } : { title: null, body: raw };
+  }
+  const end = text.indexOf(TITLE_CLOSE);
+  if (end === -1) return { title: null, body: "" };
+  return {
+    title: text.slice(TITLE_OPEN.length, end).trim() || null,
+    body: text.slice(end + TITLE_CLOSE.length).trimStart(),
+  };
+}
+
 export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTitleChange, onExitToNewTab, onStartAgentTask }: ChatPageProps) {
   const urlObj = new URL(initialUrl);
   const initialQuery = urlObj.searchParams.get("q") || "";
@@ -272,13 +293,15 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
       const activeId = currentChatId || crypto.randomUUID();
       if (!currentChatId) setCurrentChatId(activeId);
 
-      const title = initialChatTitle || (messages[0]?.content.slice(0, 40) + "..." || "New Chat");
+      const generatedTitle = pendingTitleRef.current;
+      pendingTitleRef.current = null;
+      const title = generatedTitle || initialChatTitle || (messages[0]?.content.slice(0, 40) + "..." || "New Chat");
 
       setChats(prev => {
         const existing = prev.find(c => c.id === activeId);
         let updated: ChatSession[];
         if (existing) {
-          updated = prev.map(c => c.id === activeId ? { ...c, messages, updatedAt: Date.now() } : c);
+          updated = prev.map(c => c.id === activeId ? { ...c, messages, updatedAt: Date.now(), ...(generatedTitle ? { title: generatedTitle } : {}) } : c);
         } else {
           updated = [{ id: activeId, title, messages, updatedAt: Date.now(), projectId: activeProjectId || undefined }, ...prev];
         }
@@ -289,6 +312,10 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
     }
   }, [messages]);
 
+  const pendingTitleRef = useRef<string | null>(null);
+  // Mount-only entrance animation (not replayed when switching back to this tab).
+  const [isEntering, setIsEntering] = useState(true);
+
   const requestReply = async (payloadHistory: ChatMessage[], imageUrl?: string) => {
     setIsLoading(true);
 
@@ -298,19 +325,25 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
         content: m.content
       }));
 
+      // Only the first reply of an untitled chat asks the model for a title.
+      const wantsTitle = !initialChatTitle && !currentChatId && payloadHistory.length === 1;
+      if (wantsTitle) payloadMessages.unshift({ role: "system", content: TITLE_INSTRUCTION });
+
       let accumulated = "";
       const result = await window.api!.chatStreamRequest(
         { agentRole: "conversant", messages: payloadMessages, ...(imageUrl ? { imageUrl } : {}) },
         (delta: string) => {
           accumulated += delta;
           setIsLoading(false);
-          setStreamingReply(accumulated);
+          setStreamingReply(wantsTitle ? splitTitle(accumulated).body : accumulated);
         }
       );
 
       if (!result.error) {
-        if (accumulated) {
-          setMessages(prev => [...prev, { role: "conversant", content: accumulated }]);
+        const { title, body } = wantsTitle ? splitTitle(accumulated) : { title: null, body: accumulated };
+        if (title) pendingTitleRef.current = title;
+        if (body) {
+          setMessages(prev => [...prev, { role: "conversant", content: body }]);
         } else if (result.data) {
           const replyText = typeof result.data.reply === "string" ? result.data.reply : JSON.stringify(result.data.reply);
           setMessages(prev => [...prev, { role: "conversant", content: replyText }]);
@@ -774,7 +807,10 @@ export default function ChatPage({ tabId: _tabId, initialUrl, onUrlChange, onTit
   );
 
   return (
-    <div className="chat-page-container">
+    <div
+      className={`chat-page-container${isEntering ? " entering" : ""}`}
+      onAnimationEnd={(event) => { if (event.target === event.currentTarget) setIsEntering(false); }}
+    >
       {copyError && <div className="chat-toast chat-toast-error">{copyError}</div>}
       {isSidebarOpen && (
         <div className="chat-sidebar">

@@ -60,6 +60,9 @@ declare global {
       removeCookie: (cookie: { domain?: string; path?: string; secure?: boolean; name: string }) => Promise<void>;
       clearSiteData: (site: string) => Promise<void>;
       clearAllSiteData: () => Promise<void>;
+      getLocationMask: () => Promise<{ enabled: boolean; proxy: string }>;
+      setLocationMask: (patch: { enabled?: boolean; proxy?: string }) => Promise<{ enabled: boolean; proxy: string }>;
+      onLocationMaskChanged: (callback: (mask: { enabled: boolean; proxy: string }) => void) => (() => void);
       getSettings: () => Promise<BrowserSettings>;
       updateSettings: (patch: DeepPartial<BrowserSettings>) => Promise<BrowserSettings>;
       onSettingsChanged: (callback: (settings: BrowserSettings) => void) => (() => void);
@@ -69,25 +72,24 @@ declare global {
       onDownloadProgress: (callback: (_event: any, info: { id: string; percent: number | null }) => void) => (() => void);
       onDownloadDone: (callback: (_event: any, info: { id: string; success: boolean; path: string }) => void) => (() => void);
       showItemInFolder: (filePath: string) => void;
-      onAgentNavigate: (callback: (_event: any, url: string) => void) => (() => void);
-      onAgentNewTab: (callback: (_event: any, url?: string) => void) => (() => void);
       onAgentReloadActiveTab: (callback: () => void) => (() => void);
       onAgentCloseActiveTab: (callback: () => void) => (() => void);
-      onAgentSwitchToTab: (callback: (_event: any, url: string) => void) => (() => void);
-      runAgentInstruction: (instruction: string) => Promise<void>;
-      onAgentCursorFlash: (callback: (_event: any, pos: { x: number; y: number }) => void) => (() => void);
-      onAgentAction: (callback: (_event: any, description: string) => void) => (() => void);
-      stopAgent: () => void;
-      pauseAgent: () => void;
-      resumeAgent: () => void;
-      onAgentDone: (callback: (_event: any, answer: string) => void) => (() => void);
-      onAgentWarn: (callback: (_event: any, message: string) => void) => (() => void);
-      onAgentSupervisor: (callback: (_event: any, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) => (() => void);
+      runAgentInstruction: (request: { sessionId: string; text: string; history?: { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor'; text: string }[]; notes?: string }) => Promise<void>;
+      onAgentCursorFlash: (callback: (_event: any, sessionId: string, pos: { x: number; y: number }) => void) => (() => void);
+      onAgentAction: (callback: (_event: any, sessionId: string, description: string) => void) => (() => void);
+      stopAgent: (sessionId: string) => void;
+      pauseAgent: (sessionId: string) => void;
+      resumeAgent: (sessionId: string) => void;
+      onAgentDone: (callback: (_event: any, sessionId: string, answer: string) => void) => (() => void);
+      onAgentWarn: (callback: (_event: any, sessionId: string, message: string) => void) => (() => void);
+      onAgentSupervisor: (callback: (_event: any, sessionId: string, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => void) => (() => void);
+      onAgentNotes: (callback: (_event: any, sessionId: string, notes: string) => void) => (() => void);
       onOpenUrlInNewTab: (callback: (_event: any, url: string, info?: { disposition?: string; openerId?: number }) => void) => (() => void);
       chatRequest: (payload: any) => Promise<any>;
       chatStreamRequest: (payload: any, onChunk: (delta: string) => void) => Promise<any>;
       dispatcherRequest: (text: string) => Promise<any>;
       classifyChatInput: (text: string) => Promise<any>;
+      generateSessionTitle: (text: string) => Promise<any>;
     };
   }
 }

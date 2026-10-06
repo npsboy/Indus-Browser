@@ -7,6 +7,7 @@ import path from "path";
 import { readFileSync, writeFileSync } from "fs";
 import { fromElectronDetails } from "@ghostery/adblocker-electron";
 import { COSMETIC_PRELOAD, getAdblocker, initAdblock } from "./adblock";
+import { proxyOverrideFor, webRtcPolicyOverrideFor } from "./locationMask";
 
 export type SearchEngine = "google" | "duckduckgo" | "brave" | "bing" | "startpage";
 export type DnsProvider = "cloudflare" | "quad9" | "google" | "mullvad" | "custom";
@@ -351,19 +352,23 @@ export function attachShieldsToGuest(contents: Electron.WebContents) {
 }
 
 function applyWebRtcPolicyTo(contents: Electron.WebContents) {
-    contents.setWebRTCIPHandlingPolicy(settings.shields.preventWebRtcLeak ? "default_public_interface_only" : "default");
+    contents.setWebRTCIPHandlingPolicy(
+        webRtcPolicyOverrideFor(contents) ?? (settings.shields.preventWebRtcLeak ? "default_public_interface_only" : "default"),
+    );
 }
 
-function applyWebRtcPolicy() {
+export function applyWebRtcPolicy() {
     for (const contents of webContents.getAllWebContents()) {
         if (contents.getType() === "webview" && !contents.isDestroyed()) applyWebRtcPolicyTo(contents);
     }
 }
 
-function applyProxy(ses: Electron.Session) {
+export function applyProxy(ses: Electron.Session) {
     const { mode, rules, bypass } = settings.proxy;
+    const masked = proxyOverrideFor(ses);
     const config: Electron.ProxyConfig =
-        mode === "custom" && rules ? { mode: "fixed_servers", proxyRules: rules, proxyBypassRules: bypass || "<local>" }
+        masked ? { mode: "fixed_servers", proxyRules: masked, proxyBypassRules: "<local>" }
+        : mode === "custom" && rules ? { mode: "fixed_servers", proxyRules: rules, proxyBypassRules: bypass || "<local>" }
         : mode === "direct" ? { mode: "direct" }
         : { mode: "system" };
     ses.setProxy(config).catch((error) => console.error("[Settings] Could not apply proxy.", error));

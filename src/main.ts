@@ -2,15 +2,15 @@ import { app, BrowserWindow, clipboard, session, shell, webContents } from "elec
 import path from "path";
 import { ipcMain } from "electron";
 import { readFileSync } from "fs";
-import { AgentRunError, type AgentRunResumeState, runAgentWithInstruction, setAgentStopped, setAgentPaused, isAgentStopped } from "./agent/agent";
+import { AgentRunError, AgentTabClosedError, createAgentRuntime, type AgentRunResumeState, type AgentRuntime, type AgentTabInfo, type AgentTabSurface } from "./agent/agent";
+import { buildSessionInstruction, type AgentRunRequest } from "./agent/session";
 import { getMainWindow, setMainWindow } from "./windows";
-import { applyNetworkSettings, attachShieldsToGuest, blockedCountFor, getSettings, gpcEnabledFor, loadSettings, setShieldsForSite, setupShields, shieldsUpFor, siteOf, startFilterEngine, updateSettings } from "./privacy";
+import { applyEmulation, getLocationMask, manageSession, parseLocationMask, resetLocationMask, setLocationMask } from "./locationMask";
+import { applyNetworkSettings, applyProxy, applyWebRtcPolicy, attachShieldsToGuest, blockedCountFor, getSettings, gpcEnabledFor, loadSettings, setShieldsForSite, setupShields, shieldsUpFor, siteOf, startFilterEngine, updateSettings } from "./privacy";
 
 const APP_URL = "http://localhost:5173";
 
-const dispatcherPrompt = readFileSync(path.join(__dirname, "agent/prompts/dispatcher-prompt.md"), "utf-8");
 const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
-const taskClassifierPrompt = readFileSync(path.join(__dirname, "agent/prompts/task-classifier-prompt.md"), "utf-8");
 
 async function postChat(payload: any) {
     const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
@@ -70,6 +70,7 @@ function endIncognitoSessionIfLast() {
     if (openIncognitoWindows > 0) return;
     const sessions = [session.fromPartition(incognitoWebPartition()), session.fromPartition(incognitoShellPartition())];
     incognitoGeneration++;
+    resetLocationMask();
     sessions.forEach((ses) => void wipeSession(ses));
 }
 
@@ -177,7 +178,7 @@ function attachShortcutHandler(contents: Electron.WebContents) {
 
         if ((input.control || input.meta) && !input.shift && !input.alt && input.key.toLowerCase() === "q") {
             // The agent drives the regular window; it has no business in an incognito one.
-            if (!input.isAutoRepeat && !configFor(contents)?.incognito) runAgent();
+            if (!input.isAutoRepeat && !configFor(contents)?.incognito) runAgent({ sessionId: "debug-shortcut", text: "sign me up for github copilot" });
             return;
         }
 
@@ -264,6 +265,7 @@ function createWindow(opts: { incognito?: boolean; initialUrl?: string } = {}) {
     setupDownloads(session.fromPartition(config.partition));
     setupShields(session.fromPartition(config.partition));
     if (incognito) {
+        manageSession(session.fromPartition(config.partition));
         openIncognitoWindows++;
     } else {
         setMainWindow(win);
@@ -312,6 +314,9 @@ function createWindow(opts: { incognito?: boolean; initialUrl?: string } = {}) {
         webPreferences.preload = path.join(__dirname, "guestPreload.js");
         webPreferences.contextIsolation = true;
         webPreferences.nodeIntegration = false;
+        // Despite the name, this only makes the preload run in subframes too (Node stays
+        // off): the agent's click-listener hooks must be in cross-origin iframes as well.
+        webPreferences.nodeIntegrationInSubFrames = true;
         // Main decides where an incognito window's pages live, not the <webview>
         // attribute: every guest (pages and DevTools hosts alike) is forced into
         // the in-memory incognito partition.
@@ -351,6 +356,7 @@ app.on("web-contents-created", function (_event, contents) {
     // recalculation, and scoped only to the page content.
     if (contents.getType() === "webview") {
         attachShieldsToGuest(contents);
+        void applyEmulation(contents);
         // The limits are reset on navigation, so re-apply them each time
         // or native pinch can shrink the page below 100%.
         const lockVisualZoom = () => contents.setVisualZoomLevelLimits(1, 1);
@@ -612,6 +618,22 @@ ipcMain.handle('settings:update', (_event, patch: unknown) => {
     return next;
 });
 
+// "Hide my location" (incognito only; see locationMask.ts).
+ipcMain.handle('location-mask:get', () => getLocationMask());
+
+ipcMain.handle('location-mask:set', (event, patch: unknown) => {
+    if (!configFor(event.sender)?.incognito) return getLocationMask();
+    setLocationMask(parseLocationMask(patch));
+    const incognitoShells = [...windowConfigs].filter(([, config]) => config.incognito);
+    for (const [, config] of incognitoShells) applyProxy(session.fromPartition(config.partition));
+    applyWebRtcPolicy();
+    for (const contents of webContents.getAllWebContents()) {
+        if (contents.getType() === "webview") void applyEmulation(contents);
+    }
+    for (const [id] of incognitoShells) webContents.fromId(id)?.send("location-mask:changed", getLocationMask());
+    return getLocationMask();
+});
+
 ipcMain.handle('shields:get-tab-state', (_event, webContentsId: number) => {
     const guest = webContents.fromId(webContentsId);
     if (!guest || guest.getType() !== "webview") return null;
@@ -649,24 +671,29 @@ ipcMain.on('show-item-in-folder', (_event, filePath: string) => {
     shell.showItemInFolder(filePath);
 });
 
-ipcMain.handle('agent:run-instruction', async (event, instruction: string) => {
+ipcMain.handle('agent:run-instruction', async (event, request: AgentRunRequest) => {
     // The agent drives the regular window only; incognito windows can't start it.
     if (configFor(event.sender)?.incognito) return;
-    await runAgent(instruction);
+    if (!request?.sessionId) return;
+    await runAgent(request);
 });
 
-ipcMain.on('agent:stop', () => {
-    setAgentStopped(true);
-    setAgentPaused(false);
-    getMainWindow()?.webContents.send('agent:done', '');
+// Stop / pause / resume act on one conversation's agent; the others keep going.
+ipcMain.on('agent:stop', (_event, sessionId: string) => {
+    const slot = agentSlots.get(sessionId);
+    if (!slot) return;
+    if (slot.currentRun) slot.stopRequested = true;
+    slot.runtime.setStopped(true);
+    slot.runtime.setPaused(false);
+    getMainWindow()?.webContents.send('agent:done', sessionId, '');
 });
 
-ipcMain.on('agent:pause', () => {
-    setAgentPaused(true);
+ipcMain.on('agent:pause', (_event, sessionId: string) => {
+    agentSlots.get(sessionId)?.runtime.setPaused(true);
 });
 
-ipcMain.on('agent:resume', () => {
-    setAgentPaused(false);
+ipcMain.on('agent:resume', (_event, sessionId: string) => {
+    agentSlots.get(sessionId)?.runtime.setPaused(false);
 });
 
 ipcMain.handle('chat-request', async (_event, payload) => {
@@ -755,15 +782,67 @@ ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
     }
 });
 
+// The backend's `dispatcher` role is Jev, a structured decision model (not an
+// LLM): it takes state + typed questions and returns typed answers with
+// probabilities, never prose. So it can't write a chat title.
+const ROUTING_QUESTION = {
+    type: "choice",
+    instructions: "The user typed this text into the search box of a browser with a built-in AI assistant that can answer questions and also carry out tasks in the browser on the user's behalf. Should it go to a plain web search engine, or to the AI assistant chat? Only choose web-search when the text is clearly just keywords, a site or brand name, or a simple lookup. Anything phrased as a question, a request, or a command to do something (including browser tasks like 'go solve today's wordle' or 'book a table') belongs in the AI chat.",
+    criteria: {
+        "web-search": "Plain keywords, a site or brand name, or a simple lookup that a search engine answers well, with no request to do anything.",
+        "ai-chat": "A question, a request, an instruction, or a task for the assistant to perform or automate, including tasks to be done in the browser."
+    }
+};
+
+const IS_TASK_QUESTION = {
+    type: "noul",
+    instructions: "Is the user asking the assistant to perform actions in the browser (click, fill forms, navigate, book, buy, submit, automate multi-step actions), as opposed to asking a question, requesting information, or conversing?",
+    criteria: {
+        true: "Asks the assistant to do something in the browser.",
+        false: "A question, request for information, or conversation."
+    }
+};
+
+async function askJev(state: Record<string, unknown>, questions: Record<string, unknown>): Promise<{ error: boolean; status?: number; text?: string; answers?: any }> {
+    const result = await postChat({ agentRole: "dispatcher", state, questions });
+    if (result.error) return result;
+    const answers = (result.data as any)?.answers;
+    if (!answers || typeof answers !== "object") {
+        return { error: true, status: 0, text: "Dispatcher returned no answers" };
+    }
+    return { error: false, answers };
+}
+
 ipcMain.handle('dispatcher-request', async (_event, text: string) => {
     try {
-        return await postChat({
-            agentRole: "dispatcher",
+        const result = await askJev({ search_box_text: text }, { routing: ROUTING_QUESTION });
+        if (result.error) return result;
+        const choice = result.answers?.routing?.choice;
+        return { error: false, data: { routing: choice === "web-search" ? "web-search" : "ai-chat" } };
+    } catch (error: any) {
+        return { error: true, status: 0, text: error.message };
+    }
+});
+
+// Names an agent session from its first task, using the backend's dedicated titler role.
+const SESSION_TITLE_PROMPT = "You name chat sessions. Given the user's request, reply with a short title of 2 to 5 words that says what the request is about. Reply with the title only: no quotes, no trailing punctuation, no explanation.";
+
+ipcMain.handle('session:generate-title', async (_event, text: string) => {
+    try {
+        const result = await postChat({
+            agentRole: "titler",
             messages: [
-                { role: "system", content: dispatcherPrompt },
-                { role: "user", content: text }
+                { role: "system", content: SESSION_TITLE_PROMPT },
+                { role: "user", content: String(text).slice(0, 500) }
             ]
         });
+        if (result.error) return result;
+        const reply = (result.data as any)?.reply;
+        const title = (typeof reply === "string" ? reply : "")
+            .split("\n")[0]
+            .replace(/^["'\s]+|["'.\s]+$/g, "")
+            .slice(0, 60);
+        return title ? { error: false, title } : { error: true, status: 0, text: "Empty title" };
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
     }
@@ -771,72 +850,134 @@ ipcMain.handle('dispatcher-request', async (_event, text: string) => {
 
 ipcMain.handle('classify-chat-input', async (_event, text: string) => {
     try {
-        return await postChat({
-            agentRole: "dispatcher",
-            messages: [
-                { role: "system", content: taskClassifierPrompt },
-                { role: "user", content: text }
-            ]
-        });
+        const result = await askJev({ chat_message: text }, { is_task: IS_TASK_QUESTION });
+        if (result.error) return result;
+        const p = result.answers?.is_task?.noul;
+        return { error: false, data: { isTask: typeof p === "number" && p >= 0.5 } };
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
     }
 });
 
-let agentRunning = false;
+// ---- Agents -------------------------------------------------------------------
+// One agent per sidebar conversation. Each has its own runtime and its own tab, so
+// several can run at once; every event it sends is tagged with its conversation.
+type AgentSlot = {
+    runtime: AgentRuntime;
+    /** The run in progress (or still winding down after Stop), if any. */
+    currentRun: Promise<void> | null;
+    /** Set by Stop. The stop handler already tells the UI the run is done, so the stopped
+     * run must not send its own late `agent:done` — by then a new run may have started. */
+    stopRequested: boolean;
+};
+const agentSlots = new Map<string, AgentSlot>();
 
-async function runAgent(instruction?: string){
-    if (agentRunning) {
-        console.log("Agent is already running, ignoring duplicate call.");
-        return;
+/** Calls the UI's agent-tab API (window.__agentTabs, see App.tsx). */
+async function callAgentTabs<T>(method: string, ...args: unknown[]): Promise<T | null> {
+    const win = getMainWindow();
+    if (!win || win.isDestroyed()) return null;
+    const call = `window.__agentTabs ? window.__agentTabs.${method}(${args.map(a => JSON.stringify(a)).join(", ")}) : null`;
+    return win.webContents.executeJavaScript(call).catch((error) => {
+        console.warn(`[Agent] __agentTabs.${method} failed:`, error);
+        return null;
+    });
+}
+
+function agentSlotFor(sessionId: string): AgentSlot {
+    const existing = agentSlots.get(sessionId);
+    if (existing) return existing;
+    const runtime = createAgentRuntime({
+        emit: (channel, payload) => getMainWindow()?.webContents.send(channel, sessionId, payload),
+        tabs: {
+            surface: () => callAgentTabs<AgentTabSurface>("surface", sessionId),
+            openTab: async (url) => { await callAgentTabs("openTab", sessionId, url); },
+            navigate: async (url) => { await callAgentTabs("navigate", sessionId, url); },
+            switchToTab: async (url) => (await callAgentTabs<boolean>("switchToTab", sessionId, url)) === true,
+            listTabs: async () => (await callAgentTabs<AgentTabInfo[]>("listTabs", sessionId)) ?? [],
+        },
+    });
+    const slot: AgentSlot = { runtime, currentRun: null, stopRequested: false };
+    agentSlots.set(sessionId, slot);
+    return slot;
+}
+
+async function runAgent(request: AgentRunRequest) {
+    const slot = agentSlotFor(request.sessionId);
+    // A message sent right after Stop must not be dropped: wait for this conversation's
+    // stopped run (or any run still in progress) to finish, then start this one.
+    while (slot.currentRun) {
+        await slot.currentRun.catch(() => {});
     }
+    const run = runAgentOnce(slot, request);
+    slot.currentRun = run;
+    try {
+        await run;
+    } finally {
+        if (slot.currentRun === run) slot.currentRun = null;
+    }
+}
 
+async function runAgentOnce(slot: AgentSlot, request: AgentRunRequest) {
+    const { runtime } = slot;
+    const sessionId = request.sessionId;
     // New run starts fresh; stop/pause are per-run controls.
-    setAgentStopped(false);
-    setAgentPaused(false);
+    slot.stopRequested = false;
+    runtime.setStopped(false);
+    runtime.setPaused(false);
 
-    const instructionToRun = instruction ?? "sign me up for github copilot";
+    // The run sees the whole conversation, not just the latest message.
+    const instructionToRun = buildSessionInstruction(request.text, request.history);
     const MAX_ATTEMPTS = 3;
     const RETRY_DELAY_MS = 2500;
-    const mainWc = getMainWindow()?.webContents;
-    let resumeState: AgentRunResumeState | undefined;
+    const send = (channel: string, payload: unknown) => getMainWindow()?.webContents.send(channel, sessionId, payload);
+    const sendDone = (answer: string) => {
+        if (!slot.stopRequested) send('agent:done', answer);
+    };
+    // The session's notepad carries over from earlier runs in this conversation.
+    let resumeState: AgentRunResumeState | undefined = { notes: request.notes ?? "" };
 
-    agentRunning = true;
     try {
         let lastError: unknown;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            if (isAgentStopped()) {
+            if (runtime.isStopped()) {
                 console.log("[Agent] Stop requested before attempt; ending run.");
-                mainWc?.send('agent:done', '');
+                sendDone('');
                 return;
             }
             try {
-                const finalAnswer = await runAgentWithInstruction(instructionToRun, resumeState);
-                mainWc?.send('agent:done', finalAnswer || '');
+                const finalAnswer = await runtime.run(instructionToRun, resumeState);
+                sendDone(finalAnswer || '');
                 return;
             } catch (error) {
-                if (isAgentStopped()) {
+                if (runtime.isStopped()) {
                     console.log("[Agent] Stop requested during run; not retrying.");
-                    mainWc?.send('agent:done', '');
+                    sendDone('');
+                    return;
+                }
+                if (error instanceof AgentTabClosedError) {
+                    // Nothing to retry on: the tab the agent was working in is gone.
+                    send('agent:warn', "Stopped: the agent's tab was closed.");
+                    sendDone('');
                     return;
                 }
                 lastError = error;
-                console.error(`[Agent] runAgentWithInstruction failed (attempt ${attempt}/${MAX_ATTEMPTS})`, error);
+                console.error(`[Agent] run failed (attempt ${attempt}/${MAX_ATTEMPTS})`, error);
 
                 if (error instanceof AgentRunError) {
                     resumeState = {
                         plan: error.plan,
                         startTaskIndex: error.resumeTaskIndex,
+                        notes: error.notes,
                     };
                     console.log(`[Agent] Next retry will resume from macro task ${error.resumeTaskIndex + 1}/${error.plan.tasks.length}.`);
                 } else {
-                    resumeState = undefined;
+                    resumeState = { notes: resumeState?.notes ?? request.notes ?? "" };
                 }
 
                 if (attempt < MAX_ATTEMPTS) {
-                    if (isAgentStopped()) {
+                    if (runtime.isStopped()) {
                         console.log("[Agent] Stop requested before retry delay; ending run.");
-                        mainWc?.send('agent:done', '');
+                        sendDone('');
                         return;
                     }
                     const retryLabel = resumeState?.plan
@@ -849,10 +990,10 @@ async function runAgent(instruction?: string){
         }
 
         const failureMessage = lastError instanceof Error ? lastError.message : String(lastError ?? 'Unknown agent error');
-        mainWc?.send('agent:warn', `Agent failed after ${MAX_ATTEMPTS} attempts: ${failureMessage}`);
-        mainWc?.send('agent:done', '');
+        send('agent:warn', `Agent failed after ${MAX_ATTEMPTS} attempts: ${failureMessage}`);
+        sendDone('');
         throw lastError;
     } finally {
-        agentRunning = false;
+        slot.stopRequested = false;
     }
 }

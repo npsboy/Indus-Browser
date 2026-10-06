@@ -1009,6 +1009,20 @@ function App() {
   }, [showMouseCoords]);
   type ChatMessage = { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor'; text: string };
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  // The agent's notepad (its short-term memory), mirrored live from main. It belongs to
+  // the sidebar conversation: saved with it, and sent into every agent run in it.
+  const [agentNotes, setAgentNotes] = useState('');
+  const [isNotepadOpen, setIsNotepadOpen] = useState(false);
+  const [expandedNotes, setExpandedNotes] = useState<Set<number>>(new Set());
+  // Message indexes of supervisor/warning notices whose open state was flipped from its default
+  // (supervisor starts collapsed, warning starts expanded).
+  const [toggledNotices, setToggledNotices] = useState<Set<number>>(new Set());
+  const toggleNotice = (index: number) => setToggledNotices(prev => {
+    const next = new Set(prev);
+    if (!next.delete(index)) next.add(index);
+    return next;
+  });
+  const [notepadFlash, setNotepadFlash] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [agentCursor, setAgentCursor] = useState<{ x: number; y: number } | null>(null);
@@ -1027,6 +1041,8 @@ function App() {
     title: string;
     messages: ChatMessage[];
     chatHistory: { role: 'user' | 'assistant'; content: string }[];
+    /** The agent's notepad for this conversation; carried into every run in it. */
+    agentNotes?: string;
     updatedAt: number;
   };
 
@@ -1038,7 +1054,13 @@ function App() {
       return [];
     }
   });
-  const [currentSessionId, setCurrentSessionId] = useState<string>(() => crypto.randomUUID());
+  const [currentSessionId, setCurrentSessionIdState] = useState<string>(() => crypto.randomUUID());
+  // Agent events arrive in listeners registered once, so they read the open conversation from here.
+  const currentSessionIdRef = useRef(currentSessionId);
+  function setCurrentSessionId(id: string) {
+    currentSessionIdRef.current = id;
+    setCurrentSessionIdState(id);
+  }
   const [showSessionHistory, setShowSessionHistory] = useState(false);
 
   useEffect(() => {
@@ -1048,6 +1070,14 @@ function App() {
       // Ignore storage failures and keep the browser usable.
     }
   }, [sidebarSessions]);
+
+  // Agent sessions start out titled with the first words of the task; a short generated title replaces that.
+  function requestSessionTitle(sessionId: string, text: string) {
+    window.api?.generateSessionTitle(text).then(result => {
+      if (!result || result.error || !result.title) return;
+      setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: result.title } : s));
+    }).catch(() => {});
+  }
 
   useEffect(() => {
     if (chatMessages.length === 0) return;
@@ -1059,22 +1089,26 @@ function App() {
       let updated: SidebarSession[];
       if (existing) {
         updated = prev.map(s =>
-          s.id === currentSessionId ? { ...s, messages: chatMessages, chatHistory, updatedAt: Date.now() } : s
+          s.id === currentSessionId ? { ...s, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() } : s
         );
       } else {
+        if (assistantMode === 'agent' && firstUserMessage) requestSessionTitle(currentSessionId, firstUserMessage);
         updated = [
-          { id: currentSessionId, mode: assistantMode, title, messages: chatMessages, chatHistory, updatedAt: Date.now() },
+          { id: currentSessionId, mode: assistantMode, title, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() },
           ...prev,
         ];
       }
       updated.sort((a, b) => b.updatedAt - a.updatedAt);
       return updated.slice(0, 100);
     });
-  }, [chatMessages]);
+  }, [chatMessages, agentNotes]);
 
   function startNewSidebarSession() {
     setChatMessages([]);
     setChatHistory([]);
+    setAgentNotes('');
+    setExpandedNotes(new Set());
+    setToggledNotices(new Set());
     setChatInput("");
     taskSuggestion.clear();
     setCurrentSessionId(crypto.randomUUID());
@@ -1084,6 +1118,9 @@ function App() {
   function openSidebarSession(session: SidebarSession) {
     setChatMessages(session.messages);
     setChatHistory(session.chatHistory);
+    setAgentNotes(session.agentNotes ?? '');
+    setExpandedNotes(new Set());
+    setToggledNotices(new Set());
     setAssistantMode(session.mode);
     setCurrentSessionId(session.id);
     setShowSessionHistory(false);
@@ -1091,6 +1128,10 @@ function App() {
   }
 
   function deleteSidebarSession(sessionId: string) {
+    if (runningAgentsRef.current[sessionId]) {
+      window.api?.stopAgent(sessionId);
+      setAgentRunState(sessionId, null);
+    }
     setSidebarSessions(prev => prev.filter(s => s.id !== sessionId));
     if (sessionId === currentSessionId) {
       startNewSidebarSession();
@@ -1105,6 +1146,7 @@ function App() {
   const chatLoadingText = useLoadingText(isChatLoading);
   const imageAttachment = useImageAttachment();
   const [newTabRoutingError, setNewTabRoutingError] = useState<string | null>(null);
+  const [newTabLeaving, setNewTabLeaving] = useState(false);
   const closedTabsRef = useRef<{ tab: Tab; index: number }[]>([]);
   const [showFindBar, setShowFindBar] = useState(false);
   const [findQuery, setFindQuery] = useState("");
@@ -1116,8 +1158,141 @@ function App() {
   const [showAssistantMenu, setShowAssistantMenu] = useState(false);
   const [platform, setPlatform] = useState<'win32' | 'darwin' | 'linux'>('win32');
   const [tabWidth, setTabWidth] = useState(240);
-  const [isAgentRunning, setIsAgentRunning] = useState(false);
-  const [isAgentPaused, setIsAgentPaused] = useState(false);
+  // ---- Agents ---------------------------------------------------------------
+  // Each sidebar conversation has its own agent, working in its own tab; several can
+  // run at once. Their events arrive tagged with the conversation they belong to.
+  const [runningAgents, setRunningAgents] = useState<Record<string, { paused: boolean }>>({});
+  const runningAgentsRef = useRef(runningAgents);
+  const isAgentRunning = !!runningAgents[currentSessionId];
+  const isAgentPaused = !!runningAgents[currentSessionId]?.paused;
+
+  function setAgentRunState(sessionId: string, state: { paused: boolean } | null) {
+    const next = { ...runningAgentsRef.current };
+    if (state) next[sessionId] = state;
+    else delete next[sessionId];
+    runningAgentsRef.current = next;
+    setRunningAgents(next);
+  }
+
+  // Which tab each conversation's agent works in. A follow-up in the same conversation
+  // continues in the same tab. Kept in a ref (main reads it through __agentTabs) and
+  // mirrored in state so tabs re-render when an agent moves to another tab.
+  const agentTabBySessionRef = useRef<Map<string, string>>(new Map());
+  const [agentTabBySession, setAgentTabBySession] = useState<Record<string, string>>({});
+  // Tabs an agent just opened, which may not have rendered yet: "not ready", not "closed".
+  const pendingAgentTabsRef = useRef<Set<string>>(new Set());
+
+  function setAgentTab(sessionId: string, tabId: string) {
+    agentTabBySessionRef.current.set(sessionId, tabId);
+    setAgentTabBySession(Object.fromEntries(agentTabBySessionRef.current));
+  }
+
+  /** Tabs that other conversations' running agents are working in. */
+  function tabsBusyWithOtherAgents(sessionId: string): Set<string> {
+    const busy = new Set<string>();
+    for (const [sid, tabId] of agentTabBySessionRef.current) {
+      if (sid !== sessionId && runningAgentsRef.current[sid]) busy.add(tabId);
+    }
+    return busy;
+  }
+
+  /**
+   * Picks the tab a conversation's agent works in: the tab it used before, else the
+   * tab you're on (a web page or New Tab, not in use by another agent), else a new tab.
+   */
+  function claimAgentTab(sessionId: string): string {
+    const isLive = (id: string | undefined): id is string =>
+      !!id && tabsRef.current.some(t => t.id === id) && !closingIdsRef.current.has(id);
+    const busy = tabsBusyWithOtherAgents(sessionId);
+    const previous = agentTabBySessionRef.current.get(sessionId);
+    if (isLive(previous) && !busy.has(previous)) return previous;
+    const active = tabsRef.current.find(t => t.isActive && !closingIdsRef.current.has(t.id));
+    const usable = active && !busy.has(active.id) && (isNewTabUrl(active.url) || !isInternalUrl(active.url));
+    const tabId = usable ? active.id : addTab(NEW_TAB_URL);
+    if (!usable) pendingAgentTabsRef.current.add(tabId);
+    setAgentTab(sessionId, tabId);
+    return tabId;
+  }
+
+  /** What main's agent for `sessionId` sees of its tab (see AgentTabSurface in agent.ts). */
+  function agentTabSurface(sessionId: string) {
+    const tabId = agentTabBySessionRef.current.get(sessionId) ?? claimAgentTab(sessionId);
+    const tab = tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return pendingAgentTabsRef.current.has(tabId) ? null : { mode: 'closed' };
+    pendingAgentTabsRef.current.delete(tabId);
+    if (closingIdsRef.current.has(tab.id)) return { mode: 'closed' };
+    if (isNewTabUrl(tab.url) && tab.isActive) {
+      const shell = document.querySelector(`.new-tab-shell[data-tab-id="${tab.id}"]`);
+      if (shell) {
+        const r = shell.getBoundingClientRect();
+        return { mode: 'renderer', x: r.left, y: r.top, w: r.width, h: r.height };
+      }
+    }
+    if (isInternalUrl(tab.url)) return { mode: 'internal', url: tab.url };
+    const el = webviewRefs.current.get(tab.id);
+    if (!el) return null; // not mounted yet
+    const r = el.getBoundingClientRect();
+    return {
+      mode: 'webview',
+      wcId: getWebContentsIdForTab(tab.id),
+      x: r.left, y: r.top, w: r.width, h: r.height,
+      // On screen: the agent can use real input. Otherwise it works in the background.
+      visible: tab.isActive && document.visibilityState === 'visible',
+    };
+  }
+
+  // The API main uses to drive each agent's tab (callAgentTabs in main.ts). Reassigned
+  // every render so it always uses current state.
+  useEffect(() => {
+    const normalize = (u: string) => u.replace(/\/$/, "");
+    (window as any).__agentTabs = {
+      surface: agentTabSurface,
+      openTab: (sessionId: string, url: string) => {
+        const current = agentTabBySessionRef.current.get(sessionId);
+        // Follow along on screen only if you're looking at this agent's tab.
+        const foreground = !!tabsRef.current.find(t => t.id === current)?.isActive;
+        const tabId = addTab(url, { background: !foreground, openerId: current });
+        pendingAgentTabsRef.current.add(tabId);
+        setAgentTab(sessionId, tabId);
+        return tabId;
+      },
+      navigate: (sessionId: string, url: string) => {
+        const tabId = agentTabBySessionRef.current.get(sessionId) ?? claimAgentTab(sessionId);
+        if (url === 'back') goBackInTab(tabId);
+        else navigateTabToUrl(tabId, url);
+      },
+      switchToTab: (sessionId: string, url: string) => {
+        const busy = tabsBusyWithOtherAgents(sessionId);
+        const target = tabsRef.current.find(t => !closingIdsRef.current.has(t.id) && !busy.has(t.id) && normalize(t.url) === normalize(url));
+        if (!target) return false;
+        const current = agentTabBySessionRef.current.get(sessionId);
+        const foreground = !!tabsRef.current.find(t => t.id === current)?.isActive;
+        setAgentTab(sessionId, target.id);
+        if (foreground && !target.isActive) activateTab(target.id);
+        return true;
+      },
+      listTabs: (sessionId: string) => {
+        const own = agentTabBySessionRef.current.get(sessionId);
+        return tabsRef.current
+          .filter(t => !closingIdsRef.current.has(t.id))
+          .map(t => ({ id: t.id, url: t.url, title: t.title, isActive: t.isActive, isAgentTab: t.id === own }));
+      },
+    };
+  });
+
+  /** Tabs some running agent is working in (they stay rendered while hidden, see the <webview> style). */
+  const agentWorkingTabIds = new Set(
+    Object.keys(runningAgents).map(sessionId => agentTabBySession[sessionId]).filter((id): id is string => !!id)
+  );
+
+  /** Applies `update` to a conversation's messages: live if it's the open one, else in its saved session. */
+  function updateSessionMessages(sessionId: string, update: (messages: ChatMessage[]) => ChatMessage[]) {
+    if (sessionId === currentSessionIdRef.current) {
+      setChatMessages(update);
+    } else {
+      setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, messages: update(s.messages), updatedAt: Date.now() } : s));
+    }
+  }
   const [expandedAgentGroups, setExpandedAgentGroups] = useState<Set<number>>(new Set());
 
   function toggleAgentGroup(startIndex: number) {
@@ -1230,37 +1405,35 @@ function App() {
     }
   }
 
-  function startAgentRun(taskText: string, contextHistory: { role: 'user' | 'assistant'; content: string }[]) {
+  /**
+   * Hands a task to the agent. `chatTabHistory` is the conversation from the full-page
+   * Chat tab when the task comes from there; otherwise the sidebar conversation is used.
+   */
+  function startAgentRun(taskText: string, chatTabHistory?: { role: 'user' | 'assistant'; content: string }[]) {
     // The agent drives the regular window; main ignores requests from incognito ones.
     if (IS_INCOGNITO) return;
-    const contextLines = contextHistory
-      .slice(-6)
-      .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
-      .join('\n');
-    const fullInstruction = contextLines
-      ? `Context from a prior chat conversation:\n${contextLines}\n\nTask: ${taskText}`
-      : taskText;
-
-    // The agent screenshots the active tab's <webview> (or, for a new-tab page, the
-    // page itself) to work — it can't do anything useful while a chat/history tab
-    // (no webview) is active, e.g. right after a handoff from the Chat tab.
-    const activeTab = tabsRef.current.find(t => t.isActive);
-    if (activeTab && (isChatUrl(activeTab.url) || isHistoryUrl(activeTab.url))) {
-      const existingBrowsableTab = tabsRef.current.find(t => !isChatUrl(t.url) && !isHistoryUrl(t.url));
-      if (existingBrowsableTab) {
-        activateTab(existingBrowsableTab.id);
-      } else {
-        addTab(NEW_TAB_URL);
-      }
-    }
+    const history: ChatMessage[] = chatTabHistory
+      ? chatTabHistory.map(m => ({ role: m.role === 'user' ? 'user' : 'reply', text: m.content }))
+      : chatMessages;
 
     taskSuggestion.clear();
     setShowAssistant(true);
     setAssistantMode('agent');
     setChatMessages(prev => [...prev, { role: 'agent', text: `Switched to Agent mode for: "${taskText}"` }]);
-    setIsAgentRunning(true);
-    setIsAgentPaused(false);
-    window.api?.runAgentInstruction(fullInstruction);
+    // The whole conversation (including the chat that led here) and its notepad go along.
+    launchAgent(taskText, history);
+  }
+
+  /**
+   * Starts the open conversation's agent on `text`. It works in its own tab (a chat or
+   * history page can't be used, so it gets a new tab then), and keeps running if you
+   * switch conversations or tabs.
+   */
+  function launchAgent(text: string, history: ChatMessage[]) {
+    const sessionId = currentSessionIdRef.current;
+    claimAgentTab(sessionId);
+    setAgentRunState(sessionId, { paused: false });
+    window.api?.runAgentInstruction({ sessionId, text, history, notes: agentNotes });
   }
 
   async function handleAgentSend() {
@@ -1275,9 +1448,9 @@ function App() {
 
     if (assistantMode === 'agent') {
       setChatMessages(prev => [...prev, { role: 'user', text }]);
-      setIsAgentRunning(true);
-      setIsAgentPaused(false);
-      window.api?.runAgentInstruction(text);
+      // Send the conversation so far and its notepad, so a follow-up like "I meant
+      // wired earphones" is read against the earlier request rather than on its own.
+      launchAgent(text, chatMessages);
       return;
     }
 
@@ -1294,64 +1467,85 @@ function App() {
     taskSuggestion.suggest(text);
   }
 
+  // Stop / pause / resume act on the open conversation's agent only.
   function handleAgentStop() {
-    window.api?.stopAgent();
-    setIsAgentRunning(false);
-    setIsAgentPaused(false);
+    window.api?.stopAgent(currentSessionId);
+    setAgentRunState(currentSessionId, null);
     setAgentCursor(null);
   }
 
   function handleAgentPause() {
-    window.api?.pauseAgent();
-    setIsAgentPaused(true);
+    window.api?.pauseAgent(currentSessionId);
+    setAgentRunState(currentSessionId, { paused: true });
   }
 
   function handleAgentResume() {
-    window.api?.resumeAgent();
-    setIsAgentPaused(false);
+    window.api?.resumeAgent(currentSessionId);
+    setAgentRunState(currentSessionId, { paused: false });
   }
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentCursorFlash((_event: any, pos: { x: number; y: number }) => {
-      setAgentCursor({ x: pos.x, y: pos.y });
+    const cleanup = window.api?.onAgentCursorFlash((_event: any, sessionId: string, pos: { x: number; y: number }) => {
+      // Only meaningful over the tab you're looking at.
+      const tabId = agentTabBySessionRef.current.get(sessionId);
+      if (tabsRef.current.find(t => t.id === tabId)?.isActive) setAgentCursor({ x: pos.x, y: pos.y });
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentAction((_event: any, description: string) => {
-      setChatMessages(prev => [...prev, { role: 'agent', text: description }]);
+    const cleanup = window.api?.onAgentAction((_event: any, sessionId: string, description: string) => {
+      updateSessionMessages(sessionId, prev => [...prev, { role: 'agent', text: description }]);
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentDone((_event: any, answer: string) => {
-      setIsAgentRunning(false);
-      setIsAgentPaused(false);
-      setAgentCursor(null);
+    const cleanup = window.api?.onAgentDone((_event: any, sessionId: string, answer: string) => {
+      setAgentRunState(sessionId, null);
+      if (sessionId === currentSessionIdRef.current) setAgentCursor(null);
       if (answer && answer.trim()) {
-        setChatMessages(prev => [...prev, { role: 'reply', text: answer.trim() }]);
+        updateSessionMessages(sessionId, prev => [...prev, { role: 'reply', text: answer.trim() }]);
       }
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentWarn((_event: any, message: string) => {
+    const cleanup = window.api?.onAgentWarn((_event: any, sessionId: string, message: string) => {
       if (message && message.trim()) {
-        setChatMessages(prev => [...prev, { role: 'warning', text: message.trim() }]);
+        updateSessionMessages(sessionId, prev => [...prev, { role: 'warning', text: message.trim() }]);
       }
     });
     return () => cleanup?.();
   }, []);
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentSupervisor((_event: any, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => {
+    let flashTimer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = window.api?.onAgentNotes((_event: any, sessionId: string, notes: string) => {
+      if (sessionId !== currentSessionIdRef.current) {
+        setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, agentNotes: notes } : s));
+        return;
+      }
+      setAgentNotes(notes);
+      if (notes) {
+        setNotepadFlash(true);
+        clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => setNotepadFlash(false), 1200);
+      }
+    });
+    return () => {
+      clearTimeout(flashTimer);
+      cleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.api?.onAgentSupervisor((_event: any, sessionId: string, info: { count: number; limit: number; task: string; refinedPrompt: string | null }) => {
       const text = info.refinedPrompt
         ? `Noticed repeated actions (${info.count}/${info.limit}) — adjusting approach: "${info.refinedPrompt}"`
         : `Noticed repeated actions (${info.count}/${info.limit}) on: "${info.task}"`;
-      setChatMessages(prev => [...prev, { role: 'supervisor', text }]);
+      updateSessionMessages(sessionId, prev => [...prev, { role: 'supervisor', text }]);
     });
     return () => cleanup?.();
   }, []);
@@ -1795,9 +1989,14 @@ function App() {
   function navigateActiveTabToUrl(url: string) {
     const targetTabId = activeTabId ?? tabsRef.current.find(tab => tab.isActive)?.id;
     if (!targetTabId) return;
+    navigateTabToUrl(targetTabId, url);
+  }
+
+  /** Loads `url` in a tab (adding a history entry); the address bar follows only if it's the active tab. */
+  function navigateTabToUrl(targetTabId: string, url: string) {
     const isNewTab = isNewTabUrl(url);
     if (!isInternalUrl(url)) pendingNavRef.current.add(targetTabId);
-    setAddressBarValue(isNewTab ? "" : url);
+    if (tabsRef.current.find(tab => tab.id === targetTabId)?.isActive) setAddressBarValue(isNewTab ? "" : url);
     setTabs((currentTabs) =>
       currentTabs.map((tab) =>
         tab.id !== targetTabId
@@ -1822,6 +2021,13 @@ function App() {
     );
   }
 
+  // Lets the new tab page fade out before it is swapped for the destination.
+  async function playNewTabExit() {
+    setNewTabLeaving(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 220));
+    setNewTabLeaving(false);
+  }
+
   async function handleNewTabSearch(query: string) {
     setNewTabRoutingError(null);
     // Incognito skips the AI router, which would send the query to the backend.
@@ -1838,6 +2044,7 @@ function App() {
 
       const response = await withTimeout<ApiResponse>(dispatcherRequest, 2000);
       const route = !response?.error ? parseDispatcherRoute(response?.data) : null;
+      await playNewTabExit();
 
       if (route?.routing === "web-search") {
         navigateActiveTabToUrl(webSearchUrl(query));
@@ -1969,6 +2176,11 @@ function App() {
 
   function goBack() {
     const activeTab = tabsRef.current.find((tab) => tab.isActive);
+    if (activeTab) goBackInTab(activeTab.id);
+  }
+
+  function goBackInTab(tabId: string) {
+    const activeTab = tabsRef.current.find((tab) => tab.id === tabId);
     if (!activeTab || activeTab.historyIndex <= 0) return;
 
     const targetIndex = activeTab.historyIndex - 1;
@@ -2017,27 +2229,6 @@ function App() {
 
 
   useEffect(() => {
-    const cleanup = window.api?.onAgentNavigate((_event: any, url: string) => {
-      if (activeTabId) {
-        updateTabUrl(activeTabId, url);
-      }
-    });
-    return () => cleanup?.();
-  }, [activeTabId]);
-
-
-  useEffect(() => {
-    const cleanup = window.api?.onAgentNewTab((_event: any, url?: string) => {
-      if (url) {
-        addTab(url);
-      } else {
-        addTab(NEW_TAB_URL);
-      }
-    });
-    return () => cleanup?.();
-  }, []);
-
-  useEffect(() => {
     const cleanup = window.api?.onAgentReloadActiveTab(() => {
       handleReloadActiveTab();
     });
@@ -2050,14 +2241,6 @@ function App() {
     const cleanup = window.api?.onAgentCloseActiveTab(() => {
       const activeTab = tabsRef.current.find((t) => t.isActive);
       if (activeTab) closeTab(activeTab.id);
-    });
-    return () => cleanup?.();
-  }, []);
-
-  useEffect(() => {
-    const cleanup = window.api?.onAgentSwitchToTab((_event: any, url: string) => {
-      const tab = tabsRef.current.find(t => t.url === url);
-      if (tab) activateTab(tab.id);
     });
     return () => cleanup?.();
   }, []);
@@ -2874,7 +3057,8 @@ function App() {
             return (
               <div
                 key={tab.id}
-                className="new-tab-shell"
+                data-tab-id={tab.id}
+                className={`new-tab-shell${newTabLeaving && tab.isActive ? " leaving" : ""}`}
                 style={{ display: tab.isActive ? "flex" : "none" }}
               >
                 <NewTabPage
@@ -2959,10 +3143,13 @@ function App() {
                 partition={WINDOW_CONFIG.partition}
                 // @ts-ignore
                 allowpopups="true"
-                style={{
-                  flex: 1, height: "100%",
-                  display: tab.isActive ? "flex" : "none"
-                }}
+                style={
+                  !tab.isActive && agentWorkingTabIds.has(tab.id)
+                    // An agent is working in this tab while you look at another. display:none would
+                    // shrink its page to 0×0, so keep it laid out at full size behind everything.
+                    ? { position: "absolute", inset: 0, width: "100%", height: "100%", display: "flex", zIndex: -1, pointerEvents: "none" }
+                    : { flex: 1, height: "100%", display: tab.isActive ? "flex" : "none" }
+                }
               />
             );
           }
@@ -3111,7 +3298,6 @@ function App() {
                   title="New session"
                   aria-label="New session"
                   onClick={startNewSidebarSession}
-                  disabled={isAgentRunning}
                 >
                   <span className="material-symbols-outlined">edit_square</span>
                 </button>
@@ -3126,6 +3312,58 @@ function App() {
                 </button>
               </div>
             </div>
+            {assistantMode === 'agent' && !showSessionHistory && agentNotes.trim() && (() => {
+              const notes = agentNotes
+                .split('\n')
+                .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
+                .filter(Boolean);
+              return (
+                <div className={`agent-notepad${notepadFlash ? ' agent-notepad-flash' : ''}`}>
+                  <button
+                    type="button"
+                    className="agent-notepad-toggle"
+                    onClick={() => setIsNotepadOpen(open => !open)}
+                    aria-expanded={isNotepadOpen}
+                  >
+                    <span className="material-symbols-outlined agent-notepad-icon">sticky_note_2</span>
+                    <span className="agent-notepad-title">Notepad</span>
+                    <span className="agent-notepad-count">{notes.length}</span>
+                    <span className={`agent-group-chevron${isNotepadOpen ? ' agent-group-chevron-expanded' : ''}`}>
+                      <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                        <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                  </button>
+                  {isNotepadOpen && (
+                    <div className="agent-notepad-list">
+                      {notes.map((note, i) => {
+                        const isOpen = expandedNotes.has(i);
+                        return (
+                          <button
+                            key={i}
+                            type="button"
+                            className={`agent-note${isOpen ? ' agent-note-open' : ''}`}
+                            onClick={() => setExpandedNotes(prev => {
+                              const next = new Set(prev);
+                              if (!next.delete(i)) next.add(i);
+                              return next;
+                            })}
+                            aria-expanded={isOpen}
+                          >
+                            <span className="agent-note-text">{note}</span>
+                            <span className={`agent-group-chevron${isOpen ? ' agent-group-chevron-expanded' : ''}`}>
+                              <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                                <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {showSessionHistory ? (
               <div className="assistant-session-history">
                 {sidebarSessions.filter(s => s.mode === assistantMode).length === 0 ? (
@@ -3139,6 +3377,12 @@ function App() {
                         className={`assistant-session-item${session.id === currentSessionId ? ' active' : ''}`}
                         onClick={() => openSidebarSession(session)}
                       >
+                        {runningAgents[session.id] && (
+                          <span
+                            className={`assistant-session-running${runningAgents[session.id].paused ? ' paused' : ''}`}
+                            title={runningAgents[session.id].paused ? 'Agent paused' : 'Agent running'}
+                          />
+                        )}
                         <span className="assistant-session-title">{session.title}</span>
                         <span className="assistant-session-date">{formatSessionDate(session.updatedAt)}</span>
                         <button
@@ -3204,13 +3448,45 @@ function App() {
                       if (msg.role === 'supervisor') {
                         return (
                           <div key={i} className="chat-message chat-message-supervisor">
-                            <span className="chat-bubble chat-bubble-supervisor">{msg.text}</span>
+                            <div className={`chat-notice chat-notice-supervisor${toggledNotices.has(i) ? '' : ' chat-notice-collapsed'}`}>
+                              <button
+                                type="button"
+                                className="chat-notice-label"
+                                onClick={() => toggleNotice(i)}
+                                aria-expanded={toggledNotices.has(i)}
+                              >
+                                <span className="material-symbols-outlined">visibility</span>
+                                Supervisor interruption
+                                <span className={`agent-group-chevron${toggledNotices.has(i) ? ' agent-group-chevron-expanded' : ''}`}>
+                                  <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                                    <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </span>
+                              </button>
+                              {toggledNotices.has(i) && <span className="chat-notice-text">{msg.text}</span>}
+                            </div>
                           </div>
                         );
                       }
                       return (
                         <div key={i} className="chat-message chat-message-warning">
-                          <span className="chat-bubble chat-bubble-warning">{msg.text}</span>
+                          <div className={`chat-notice chat-notice-warning${!toggledNotices.has(i) ? '' : ' chat-notice-collapsed'}`}>
+                              <button
+                                type="button"
+                                className="chat-notice-label"
+                                onClick={() => toggleNotice(i)}
+                                aria-expanded={!toggledNotices.has(i)}
+                              >
+                                <span className="material-symbols-outlined">error</span>
+                                Warning
+                                <span className={`agent-group-chevron${!toggledNotices.has(i) ? ' agent-group-chevron-expanded' : ''}`}>
+                                  <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
+                                    <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </span>
+                              </button>
+                              {!toggledNotices.has(i) && <span className="chat-notice-text">{msg.text}</span>}
+                            </div>
                         </div>
                       );
                     }
@@ -3281,7 +3557,7 @@ function App() {
                   <button
                     type="button"
                     className="task-suggestion-button"
-                    onClick={() => startAgentRun(taskSuggestion.pendingTaskSuggestion!, chatHistory)}
+                    onClick={() => startAgentRun(taskSuggestion.pendingTaskSuggestion!)}
                   >
                     Switch to Agent
                   </button>
