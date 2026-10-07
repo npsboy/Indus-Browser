@@ -303,6 +303,10 @@ function buildExtractionScript(clip: { left: number; top: number; right: number;
                     const hint = el.getAttribute('data-testid') || el.id || classText(el);
                     parts.push(hint ? '(icon: ' + truncate(hint, 50) + ')' : '(icon)');
                 }
+                // Board squares: pieces and move dots carry no text, so name the square they sit on
+                // (chessground keeps it on the node as cgKey; other boards use data-square).
+                const square = (typeof el.cgKey === 'string' && el.cgKey) || el.getAttribute('data-square');
+                if (square) parts.push('@' + truncate(square, 10));
                 if ((tag === 'input' || tag === 'textarea') && el.value && !['password', 'checkbox', 'radio'].includes(type)) {
                     parts.push('value="' + truncate(el.value, 40) + '"');
                 }

@@ -189,7 +189,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     type PlannerReply = { complexity: string; tasks?: string[]; notes_edits?: unknown; step_delay_seconds?: unknown; step_delay_reason?: unknown };
 
-    async function planTask(userPrompt: string): Promise<PlannerReply | null> {
+    async function planTask(userPrompt: string, screenshot?: string): Promise<PlannerReply | null> {
         throwIfStopped();
         pendingFetchAbortController = new AbortController();
         let response: Response;
@@ -211,7 +211,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 ? `\n\nThe agent's notepad from earlier in this conversation (what was already done and found):\n${agentNotes}`
                                 : ""),
                         }
-                    ]
+                    ],
+                    ...(screenshot ? { imageUrl: screenshot } : {}),
                 }),
                 signal: pendingFetchAbortController.signal,
             });
@@ -456,7 +457,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     }
 
     async function buildTaskPlan(instruction: string): Promise<AgentTaskPlan> {
-        const plannerResult = await planTask(instruction);
+        // Let the planner see what the agent's tab shows right now; planning still works without it.
+        let screenshot: string | undefined;
+        try {
+            screenshot = (await takeScreenshot())?.base64 || undefined;
+        } catch (e) {
+            if (e instanceof AgentStoppedError || e instanceof AgentPausedError) throw e;
+            console.warn("Planner screenshot failed; planning without it:", e);
+        }
+        const plannerResult = await planTask(instruction, screenshot);
         if (!plannerResult) {
             throw new Error("Planner failed to generate a plan.");
         }
@@ -559,7 +568,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         let host: string | undefined;
         try { host = currentUrl ? new URL(currentUrl).hostname : undefined; } catch { /* not a URL */ }
         stepsSinceDecision++;
-        if (host === lastDecisionHost && stepsSinceDecision < TIP_DECISION_EVERY_STEPS) return;
+        const sameSite = host === lastDecisionHost;
+        if (sameSite && stepsSinceDecision < TIP_DECISION_EVERY_STEPS) return;
+        // A tip picked on this site stays until the site changes: re-asking mid-task (e.g. mid-game)
+        // can drop it just when it's needed. New site → start fresh.
+        if (sameSite && autoTipId) return;
+        if (!sameSite) autoTipId = null;
         lastDecisionHost = host;
         stepsSinceDecision = 0;
         try {
@@ -1929,6 +1943,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             throw new Error("Agent is already running. Stop the current run before starting a new one.");
         }
         agentRunning = true;
+        // A new request gets a fresh tip decision; the sticky tip only lasts within a run.
+        autoTipId = null;
+        lastDecisionHost = undefined;
+        stepsSinceDecision = Infinity;
         throwIfStopped();
         let finalAnswer = "";
         let currentTaskIndex = 0;
