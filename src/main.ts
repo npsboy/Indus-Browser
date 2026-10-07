@@ -785,23 +785,8 @@ ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
 // The backend's `dispatcher` role is Jev, a structured decision model (not an
 // LLM): it takes state + typed questions and returns typed answers with
 // probabilities, never prose. So it can't write a chat title.
-const ROUTING_QUESTION = {
-    type: "choice",
-    instructions: "The user typed this text into the search box of a browser with a built-in AI assistant that can answer questions and also carry out tasks in the browser on the user's behalf. Should it go to a plain web search engine, or to the AI assistant chat? Only choose web-search when the text is clearly just keywords, a site or brand name, or a simple lookup. Anything phrased as a question, a request, or a command to do something (including browser tasks like 'go solve today's wordle' or 'book a table') belongs in the AI chat.",
-    criteria: {
-        "web-search": "Plain keywords, a site or brand name, or a simple lookup that a search engine answers well, with no request to do anything.",
-        "ai-chat": "A question, a request, an instruction, or a task for the assistant to perform or automate, including tasks to be done in the browser."
-    }
-};
-
-const IS_TASK_QUESTION = {
-    type: "noul",
-    instructions: "Is the user asking the assistant to perform actions in the browser (click, fill forms, navigate, book, buy, submit, automate multi-step actions), as opposed to asking a question, requesting information, or conversing?",
-    criteria: {
-        true: "Asks the assistant to do something in the browser.",
-        false: "A question, request for information, or conversation."
-    }
-};
+const ROUTING_QUESTION = JSON.parse(readFileSync(path.join(__dirname, "agent/prompts/jev/routing-question.json"), "utf-8"));
+const IS_TASK_QUESTION = JSON.parse(readFileSync(path.join(__dirname, "agent/prompts/jev/is-task-question.json"), "utf-8"));
 
 async function askJev(state: Record<string, unknown>, questions: Record<string, unknown>): Promise<{ error: boolean; status?: number; text?: string; answers?: any }> {
     const result = await postChat({ agentRole: "dispatcher", state, questions });
@@ -825,7 +810,7 @@ ipcMain.handle('dispatcher-request', async (_event, text: string) => {
 });
 
 // Names an agent session from its first task, using the backend's dedicated titler role.
-const SESSION_TITLE_PROMPT = "You name chat sessions. Given the user's request, reply with a short title of 2 to 5 words that says what the request is about. Reply with the title only: no quotes, no trailing punctuation, no explanation.";
+const SESSION_TITLE_PROMPT = readFileSync(path.join(__dirname, "agent/prompts/session-title-prompt.md"), "utf-8").trim();
 
 ipcMain.handle('session:generate-title', async (_event, text: string) => {
     try {

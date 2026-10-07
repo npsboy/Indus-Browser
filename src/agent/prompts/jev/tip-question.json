@@ -1,0 +1,7 @@
+{
+    "type": "choice",
+    "instructions": "A browser agent is working on the task described in the state. Choose the one tip that would clearly help it with what it is doing or stuck on right now, or none if no tip clearly applies. Prefer none over a tip that is only loosely related.",
+    "criteria": {
+        "none": "No tip clearly applies to the current situation."
+    }
+}

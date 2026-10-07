@@ -49,11 +49,25 @@ const plannerPrompt =readFileSync(join(__dirname, "prompts/planner-prompt.md"), 
 const completionCheckPrompt = readFileSync(join(__dirname, "prompts/completion-check-prompt.md"), "utf-8");
 const progressCheckPrompt = readFileSync(join(__dirname, "prompts/progress-check-prompt.md"), "utf-8");
 const supervisorPrompt = readFileSync(join(__dirname, TARGETING_MODE === "labels" ? "prompts/supervisor-prompt.md" : "prompts/supervisor-prompt-grid.md"), "utf-8");
+const supervisorInstruction = readFileSync(join(__dirname, "prompts/supervisor-instruction.md"), "utf-8").trim();
+// Questions for the decision model (Jev): typed questions, not chat prompts.
+const repetitionQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/repetition-question.json"), "utf-8"));
+const tipQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/tip-question.json"), "utf-8"));
+/** Below this, a "progressing" verdict from Jev still goes to the supervisor. */
+const REPETITION_CHECK_MIN_CONFIDENCE = 0.7;
 
 export type AgentTaskPlan = {
     complexity: string;
     tasks: string[];
+    /** Optional pause the planner asked for before each agent call (e.g. to let a page or game update). */
+    stepDelayMs?: number;
+    stepDelayReason?: string;
 };
+
+/** Upper bound on the planner's step delay, so a bad value can't stall a run. */
+const MAX_STEP_DELAY_MS = 120_000;
+/** Wait between agent calls when the planner doesn't set one. */
+const DEFAULT_STEP_DELAY_MS = 300;
 
 export type AgentRunResumeState = {
     plan?: AgentTaskPlan;
@@ -173,7 +187,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         throwIfStopped();
     }
 
-    async function planTask(userPrompt: string): Promise<{ complexity: string; tasks?: string[]; notes_edits?: unknown } | null> {
+    type PlannerReply = { complexity: string; tasks?: string[]; notes_edits?: unknown; step_delay_seconds?: unknown; step_delay_reason?: unknown };
+
+    async function planTask(userPrompt: string): Promise<PlannerReply | null> {
         throwIfStopped();
         pendingFetchAbortController = new AbortController();
         let response: Response;
@@ -218,10 +234,44 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             } else {
                 replyStr = JSON.stringify(data.reply);
             }
-            return JSON.parse(replyStr) as { complexity: string; tasks?: string[]; notes_edits?: unknown };
+            return JSON.parse(replyStr) as PlannerReply;
         } catch (e) {
             console.error("Failed to parse planner reply:", e);
             return null;
+        }
+    }
+
+    /**
+     * Cheap gate in front of the supervisor: asks the decision model (Jev, via the dispatcher role)
+     * whether the repeated actions look like a stuck loop or like progress (e.g. moves in a game).
+     * Only a confident "progressing" skips the supervisor; anything else (stuck, escalate —
+     * needs a screenshot or a smarter model —, low confidence, an error) hands over to it.
+     */
+    async function jevSeesStuckLoop(mainTask: string, currentTask: string, repeatedAction: PastAction): Promise<boolean> {
+        try {
+            const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    agentRole: "dispatcher",
+                    state: {
+                        task: mainTask,
+                        current_step: currentTask,
+                        repeated_action: `${repeatedAction.tool}: ${repeatedAction.explanation ?? ""}`,
+                        recent_actions: past_actions.slice(-10).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
+                        agent_notepad: agentNotes.slice(-1000),
+                    },
+                    questions: { stuck: repetitionQuestion },
+                }),
+                signal: AbortSignal.timeout(5000),
+            });
+            if (!response.ok) throw new Error(`dispatcher returned ${response.status}`);
+            const answer = (await response.json())?.answers?.stuck;
+            console.log(`[Agent] repetition check: ${answer?.choice} (confidence ${answer?.confidence})`);
+            return !(answer?.choice === "progressing" && typeof answer.confidence === "number" && answer.confidence >= REPETITION_CHECK_MIN_CONFIDENCE);
+        } catch (error) {
+            console.warn("[Agent] repetition check failed, falling back to supervisor:", error);
+            return true;
         }
     }
 
@@ -250,7 +300,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 `Full plan: ${JSON.stringify(plan.tasks)}`,
                                 `Recent actions: ${JSON.stringify(recentActions)}`,
                                 `Agent's notepad (its short-term memory):\n${agentNotes || "(empty)"}`,
-                                "Determine if the actions indicate abnormal repetition. If yes, return a refined prompt for only the current macro task. If the notepad is wrong, stale or missing something that keeps the agent stuck, fix it with notes_edits."
+                                supervisorInstruction
                             ].join("\n")
                         }
                     ],
@@ -414,6 +464,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         console.log("Planner result:", plannerResult);
         applyNotesEdits(plannerResult.notes_edits, "planner");
 
+        const delaySeconds = toNumberIfFinite(plannerResult.step_delay_seconds);
+        // Left out (undefined) means the default; 0 means the planner wants no wait at all.
+        const stepDelayMs = delaySeconds !== null && delaySeconds >= 0
+            ? Math.min(Math.round(delaySeconds * 1000), MAX_STEP_DELAY_MS)
+            : undefined;
+        const stepDelay = stepDelayMs !== undefined
+            ? {
+                stepDelayMs,
+                ...(typeof plannerResult.step_delay_reason === "string" && plannerResult.step_delay_reason.trim()
+                    ? { stepDelayReason: plannerResult.step_delay_reason.trim() }
+                    : {}),
+            }
+            : {};
+
         if (plannerResult.complexity === "complex") {
             console.log("Planner determined the task is complex.");
             const tasks = plannerResult.tasks;
@@ -424,13 +488,24 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return {
                 complexity: plannerResult.complexity,
                 tasks,
+                ...stepDelay,
             };
         }
 
         return {
             complexity: plannerResult.complexity,
             tasks: [instruction],
+            ...stepDelay,
         };
+    }
+
+    /** The current run's step delay. One the planner set is shown to the agent on every call. */
+    let activeStepDelay: { ms: number; reason?: string; isDefault: boolean } | null = null;
+
+    function stepDelayContext(): string {
+        if (!activeStepDelay || activeStepDelay.isDefault || activeStepDelay.ms <= 0) return "";
+        const seconds = +(activeStepDelay.ms / 1000).toFixed(1);
+        return `\nStep delay: the planner set a ${seconds}s wait before each of your steps${activeStepDelay.reason ? ` (${activeStepDelay.reason})` : ""}. The screenshot is taken after that wait, so you don't need to spend steps waiting yourself; plan each action knowing the page will have had ${seconds}s to change by your next step.`;
     }
 
 
@@ -501,10 +576,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                     },
                     questions: {
                         tip: {
-                            type: "choice",
-                            instructions: "A browser agent is working on the task described in the state. Choose the one tip that would clearly help it with what it is doing or stuck on right now, or none if no tip clearly applies. Prefer none over a tip that is only loosely related.",
+                            ...tipQuestion,
                             criteria: {
-                                none: "No tip clearly applies to the current situation.",
+                                ...tipQuestion.criteria,
                                 ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
                             },
                         },
@@ -789,7 +863,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         ...(past_actions.length > 0
                             ? [{ role: "system", content: "Previous actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n") }]
                             : []),
-                        { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}` }
+                        { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${stepDelayContext()}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}` }
                     ],
                     ...(imageurl ? { imageUrl: imageurl } : {}),
                     // The backend's default tools are label-based; grid mode overrides them.
@@ -1590,6 +1664,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             cmd = { type: "agent:read_notes" };
         } else if (tool.name === "get_tips") {
             cmd = { type: "agent:get_tips", topic: String(tool_arguments.topic ?? "") };
+        } else if (tool.name === "change_step_delay") {
+            cmd = { type: "agent:change_step_delay", seconds: tool_arguments.seconds, reason: typeof tool_arguments.reason === "string" ? tool_arguments.reason.trim() : "" };
         }
         return cmd;
     }
@@ -1816,6 +1892,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     ]);
     // How far back to look for repetition — matches the window the supervisor itself sees.
     const REPETITION_WINDOW = 15;
+    // Tighter window for same-target repeats, which are the noisiest signal.
+    const TARGET_REPETITION_WINDOW = 8;
 
     function findRepetetion(currentAction: PastAction, past_actions: PastAction[]) {
         function getWords(text: string) {
@@ -1826,7 +1904,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         if (currentKey !== null) {
             // A stable target identity is the reliable signal — trust it alone, since mixing
             // in text overlap would flag unrelated actions just for sharing common wording.
-            return recent.filter(action => actionTargetKey(action) === currentKey).length;
+            // Only look at the last few actions: board games, grids and calendars legitimately
+            // revisit the same target over a longer stretch while making real progress.
+            return recent.slice(-TARGET_REPETITION_WINDOW).filter(action => actionTargetKey(action) === currentKey).length;
         }
         // No stable target available (type/keypress/navigate/wait/unlabeled scroll): fall back
         // to a stricter text-overlap check so generic phrasing alone doesn't count as a repeat.
@@ -1886,6 +1966,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                 }
             }
 
+            activeStepDelay = plan.stepDelayMs !== undefined
+                ? { ms: plan.stepDelayMs, reason: plan.stepDelayReason, isDefault: false }
+                : { ms: DEFAULT_STEP_DELAY_MS, isDefault: true };
+            if (!activeStepDelay.isDefault) {
+                const seconds = +(activeStepDelay.ms / 1000).toFixed(1);
+                console.log(`[Agent] Planner set a ${seconds}s delay between steps${activeStepDelay.reason ? `: ${activeStepDelay.reason}` : ""}`);
+                emit("agent:action", `Waiting ${seconds}s between steps${activeStepDelay.reason ? ` (${activeStepDelay.reason})` : ""}`);
+            }
+            emit("agent:step-delay", activeStepDelay);
+            // The first agent call of the run goes out right away; the delay is only between calls.
+            let delayBeforeNextCall = false;
+
             const tasks = plan.tasks;
             const requestedStartIndex = resumeState.startTaskIndex ?? 0;
             startTaskIndex = Math.min(Math.max(requestedStartIndex, 0), tasks.length - 1);
@@ -1920,6 +2012,14 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
                         // Wait if paused (returns true if stopped while paused)
                         if (await waitIfPaused()) break;
+
+                        if (activeStepDelay && activeStepDelay.ms > 0 && delayBeforeNextCall) {
+                            emit("agent:step-wait", { ms: activeStepDelay.ms });
+                            await sleepInterruptible(activeStepDelay.ms);
+                            // The planner's wait shouldn't count against the task's time budget.
+                            taskStartTime += activeStepDelay.ms;
+                        }
+                        delayBeforeNextCall = true;
 
                         iterationCount++;
                         if (iterationCount > MAX_ITERATIONS_PER_TASK || Date.now() - taskStartTime > MAX_TASK_DURATION_MS) {
@@ -2094,6 +2194,24 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                             continue;
                         }
 
+                        if (cmd.type === "agent:change_step_delay") {
+                            const seconds = toNumberIfFinite(cmd.seconds);
+                            let delayResult: string;
+                            if (seconds === null || seconds < 0) {
+                                delayResult = "failed: `seconds` must be a number from 0 to 120.";
+                            } else {
+                                const ms = Math.min(Math.round(seconds * 1000), MAX_STEP_DELAY_MS);
+                                activeStepDelay = { ms, ...(cmd.reason ? { reason: cmd.reason } : {}), isDefault: false };
+                                emit("agent:step-delay", activeStepDelay);
+                                delayResult = `step delay set to ${+(ms / 1000).toFixed(1)}s${ms < Math.round(seconds * 1000) ? " (capped)" : ""}`;
+                            }
+                            console.log(`[Agent] change_step_delay: ${delayResult}`);
+                            const delayExplanation = tool_arguments.explanation || "Changed the step delay.";
+                            past_actions.push({ tool: tool.name, parameters: { seconds: cmd.seconds }, explanation: delayExplanation, result: delayResult });
+                            emit("agent:action", delayExplanation);
+                            continue;
+                        }
+
                         throwIfStopped();
 
                         console.log("Executing command:", cmd);
@@ -2169,6 +2287,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 throwIfStopped();
                                 console.log("______________________________")
                                 console.log(`Agent has executed the same action ${repetitionCount} times:`, tool_arguments);
+                                if (!(await jevSeesStuckLoop(instruction, currentTask, pushedAction))) {
+                                    throwIfStopped();
+                                    console.log("Repetition judged to be progress; skipping supervisor.");
+                                    await waitForDomChange(1500);
+                                    continue;
+                                }
+                                throwIfStopped();
                                 const supervisorResponse = await runSupervisor(instruction, plan, currentTaskIndex, screenshot);
                                 applyNotesEdits(supervisorResponse?.notes_edits, "supervisor");
                                 if (supervisorResponse?.abnormal_repetition) {
@@ -2232,6 +2357,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             agentStopped = false;
             agentPaused = false;
             agentRunning = false;
+            activeStepDelay = null;
         }
     }
 

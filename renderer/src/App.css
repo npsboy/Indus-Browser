@@ -1556,8 +1556,19 @@
 }
 
 .agent-notepad-count {
-  flex: 1;
+  flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+}
+
+/* Glimpse of the latest note while the notepad is collapsed. */
+.agent-notepad-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  opacity: 0.75;
 }
 
 .agent-notepad-list {
@@ -1646,6 +1657,30 @@
 .agent-control-button img {
   width: 16px;
   height: 16px;
+}
+
+.agent-step-delay-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid #27272a;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #a1a1aa;
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.agent-step-delay-chip .material-symbols-outlined {
+  font-size: 14px;
+}
+
+.agent-step-delay-chip-waiting {
+  color: #e4e4e7;
+  border-color: #3f3f46;
 }
 
 .agent-stop-button {

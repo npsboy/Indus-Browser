@@ -170,6 +170,22 @@ export const GRID_MODE_TOOLS = [
     {
         type: "function",
         function: {
+            name: "change_step_delay",
+            description: "Change the wait before each of your steps for the rest of the task. Raise it when the page needs time to react between your actions (e.g. an opponent's move in a board game, slow loading); lower it (0 for none) when no waiting is needed anymore. The screenshot is taken after this wait.",
+            parameters: {
+                type: "object",
+                properties: {
+                    seconds: { type: "number", description: "Seconds to wait before each step, 0 to 120." },
+                    reason: { type: "string", description: "Short reason for the new delay." },
+                    explanation: { type: "string", description: "one tiny sentence describing why you are changing the delay." },
+                },
+                required: ["seconds"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "final_answer",
             description: "Conclude the agent execution with a final answer to the user's original query/ task. Use this when you feel you have completed the entire task to a reasonable level.",
             parameters: {

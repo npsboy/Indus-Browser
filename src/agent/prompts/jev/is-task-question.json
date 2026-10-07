@@ -1,0 +1,8 @@
+{
+    "type": "noul",
+    "instructions": "Is the user asking the assistant to perform actions in the browser (click, fill forms, navigate, book, buy, submit, automate multi-step actions), as opposed to asking a question, requesting information, or conversing?",
+    "criteria": {
+        "true": "Asks the assistant to do something in the browser.",
+        "false": "A question, request for information, or conversation."
+    }
+}

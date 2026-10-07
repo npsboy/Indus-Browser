@@ -43,6 +43,18 @@ Return:
 
 <br> <br>
 
+## Delay between agent steps (optional)
+By default the agent waits 0.3 seconds before every step after the first. In either case (simple or complex) you may change this by adding `step_delay_seconds` (a number from 0 to 120; 0 means no wait) and a short `step_delay_reason` to your JSON. The agent is then told about the wait. Set a longer delay only when the task needs time to pass between actions, e.g. a turn-based game where the opponent moves after each turn, a live page or video that has to play or update, a site that rate-limits or flags fast actions, or the user asking the agent to go slowly. Leave it out for normal tasks, since a longer delay makes every step slower.
+
+Example:
+```
+{
+    "complexity": "simple",
+    "step_delay_seconds": 3,
+    "step_delay_reason": "the chess opponent needs time to make its move after each turn"
+}
+```
+
 ## Editing the agent's notepad (optional)
 If you are given the agent's notepad, you may fix it before the new plan starts by adding a `notes_edits` array to your JSON (in either case, simple or complex). Use it only when it helps, e.g. to tick off old PLAN steps that are clearly done, strike steps the user no longer wants, or correct a fact the latest message changed. If you return a complex plan, it automatically replaces the old PLAN in the notepad (the old unticked steps are removed, finished ones are kept) — so never rewrite the old plan or write your new plan in `notes_edits`.
 Each edit is one of:

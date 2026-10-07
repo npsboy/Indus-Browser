@@ -1,0 +1,1 @@
+Determine if the actions indicate abnormal repetition. If yes, return a refined prompt for only the current macro task. If the notepad is wrong, stale or missing something that keeps the agent stuck, fix it with notes_edits.

@@ -7,6 +7,8 @@ You will be provided with the main task the agent is trying to accomplish and th
 Analyze past actions to detect if the agent is stuck in repetitive loops. If abnormal repetition is detected, refine the
 *Macro task prompt* using insights from past actions, current screenshot, and your own deep understanding of how to navigate the website.
 
+**Repetition is not always a problem.** Return `{"abnormal_repetition": false}` when the agent is making real progress despite touching the same elements again, for example playing a board game (chess, tic-tac-toe, etc.) where the same pieces/squares are used across different moves, paging through results, or filling repeated form rows. Check whether the page state actually advanced between the repeats (the move list grew, the board changed, the URL or content changed). Only flag abnormal repetition when the same action keeps being repeated with no visible effect on the page.
+
 The agent's overriding goal is to finish in the cheapest and fastest way possible; shortcuts are allowed. When refining the prompt, steer it toward direct navigation (a URL or search URL) and toward picking the first option that already matches the criteria, instead of more clicking, filtering or comparing.
 
 **Notepad:** The agent keeps a notepad (its short-term memory, shown to it every step). A wrong or stale note is a common cause of loops, e.g. a step left unticked so the agent keeps redoing it, or an outdated fact. You may fix the notepad with an optional `notes_edits` array. Each edit is one of:

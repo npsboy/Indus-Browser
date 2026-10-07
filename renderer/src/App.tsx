@@ -1191,7 +1191,28 @@ function App() {
     else delete next[sessionId];
     runningAgentsRef.current = next;
     setRunningAgents(next);
+    if (!state) {
+      setStepDelays(prev => {
+        if (!prev[sessionId]) return prev;
+        const { [sessionId]: _removed, ...rest } = prev;
+        return rest;
+      });
+    }
   }
+
+  // The wait between steps the planner set for each running agent, and when its current wait ends.
+  const [stepDelays, setStepDelays] = useState<Record<string, { ms: number; reason?: string; isDefault?: boolean; waitUntil?: number }>>({});
+  const currentStepDelay = isAgentRunning ? stepDelays[currentSessionId] : undefined;
+  const [stepDelayNow, setStepDelayNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!currentStepDelay?.waitUntil || currentStepDelay.waitUntil <= Date.now()) return;
+    const timer = setInterval(() => setStepDelayNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [currentStepDelay?.waitUntil]);
+  // Sub-second waits (like the default) would just flash "1s" every step, so they get no countdown.
+  const stepWaitLeft = currentStepDelay?.waitUntil && currentStepDelay.ms >= 1000 && !isAgentPaused
+    ? Math.ceil((currentStepDelay.waitUntil - stepDelayNow) / 1000)
+    : 0;
 
   // Which tab each conversation's agent works in. A follow-up in the same conversation
   // continues in the same tab. Kept in a ref (main reads it through __agentTabs) and
@@ -1575,6 +1596,24 @@ function App() {
       updateSessionMessages(sessionId, prev => [...prev, { role: 'supervisor', text }]);
     });
     return () => cleanup?.();
+  }, []);
+
+  useEffect(() => {
+    const cleanupDelay = window.api?.onAgentStepDelay((_event: any, sessionId: string, delay: { ms: number; reason?: string; isDefault?: boolean } | null) => {
+      setStepDelays(prev => {
+        const { [sessionId]: _old, ...rest } = prev;
+        return delay ? { ...rest, [sessionId]: delay } : rest;
+      });
+    });
+    const cleanupWait = window.api?.onAgentStepWait((_event: any, sessionId: string, wait: { ms: number }) => {
+      const waitUntil = Date.now() + wait.ms;
+      setStepDelayNow(Date.now());
+      setStepDelays(prev => prev[sessionId] ? { ...prev, [sessionId]: { ...prev[sessionId], waitUntil } } : prev);
+    });
+    return () => {
+      cleanupDelay?.();
+      cleanupWait?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -3404,6 +3443,9 @@ function App() {
                     <span className="material-symbols-outlined agent-notepad-icon">sticky_note_2</span>
                     <span className="agent-notepad-title">Notepad</span>
                     <span className="agent-notepad-count">{notes.length}</span>
+                    <span className="agent-notepad-preview">
+                      {!isNotepadOpen ? notes[notes.length - 1] : ''}
+                    </span>
                     <span className={`agent-group-chevron${isNotepadOpen ? ' agent-group-chevron-expanded' : ''}`}>
                       <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
                         <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -3653,6 +3695,19 @@ function App() {
                   >
                     <img src={isAgentPaused ? playIcon : pauseIcon} alt={isAgentPaused ? "Resume" : "Pause"} />
                   </button>
+                  {currentStepDelay && (
+                    <div
+                      className={`agent-step-delay-chip${stepWaitLeft > 0 ? ' agent-step-delay-chip-waiting' : ''}`}
+                      title={currentStepDelay.isDefault
+                        ? 'Default wait between agent steps'
+                        : currentStepDelay.reason ? `Set by the planner: ${currentStepDelay.reason}` : 'Set by the planner'}
+                    >
+                      <span className="material-symbols-outlined">timer</span>
+                      {stepWaitLeft > 0
+                        ? `Next step in ${stepWaitLeft}s`
+                        : `${+(currentStepDelay.ms / 1000).toFixed(1)}s between steps${currentStepDelay.isDefault ? ' (default)' : ''}`}
+                    </div>
+                  )}
                 </div>
               )}
               {assistantMode === 'chat' && imageAttachment.pendingImage && (

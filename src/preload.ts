@@ -201,6 +201,17 @@ function onAgentSupervisor(callback: (_event: any, sessionId: string, info: { co
   return () => ipcRenderer.removeListener('agent:supervisor', callback);
 }
 
+// The step delay the planner set for the run (null if none), and each wait as it starts.
+function onAgentStepDelay(callback: (_event: any, sessionId: string, delay: { ms: number; reason?: string; isDefault?: boolean } | null) => void) {
+  ipcRenderer.on('agent:step-delay', callback);
+  return () => ipcRenderer.removeListener('agent:step-delay', callback);
+}
+
+function onAgentStepWait(callback: (_event: any, sessionId: string, wait: { ms: number }) => void) {
+  ipcRenderer.on('agent:step-wait', callback);
+  return () => ipcRenderer.removeListener('agent:step-wait', callback);
+}
+
 function onOpenUrlInNewTab(callback: (_event: any, url: string, info?: { disposition?: string; openerId?: number }) => void) {
   ipcRenderer.on('browser:open-url-in-new-tab', callback);
   return () => ipcRenderer.removeListener('browser:open-url-in-new-tab', callback);
@@ -327,6 +338,8 @@ contextBridge.exposeInMainWorld('api', {
     onAgentDone,
     onAgentWarn,
     onAgentSupervisor,
+    onAgentStepDelay,
+    onAgentStepWait,
     onAgentNotes,
     onAgentTip,
     onOpenUrlInNewTab,
