@@ -1195,6 +1195,9 @@ function App() {
   const runningAgentsRef = useRef(runningAgents);
   const isAgentRunning = !!runningAgents[currentSessionId];
   const isAgentPaused = !!runningAgents[currentSessionId]?.paused;
+  // The notepad and tips belong to the agent, so they show only while the conversation is on the agent's side.
+  const showAgentPanels = !showSessionHistory
+    && (assistantMode === 'agent' || (assistantMode === 'auto' && lastRoute(chatMessages) === 'agent'));
 
   function setAgentRunState(sessionId: string, state: { paused: boolean } | null) {
     const next = { ...runningAgentsRef.current };
