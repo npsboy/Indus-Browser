@@ -47,6 +47,7 @@ const taskTips: TaskTip[] = readFileSync(join(__dirname, "prompts/task-tips.md")
     });
 const plannerPrompt =readFileSync(join(__dirname, "prompts/planner-prompt.md"), "utf-8");
 const completionCheckPrompt = readFileSync(join(__dirname, "prompts/completion-check-prompt.md"), "utf-8");
+const progressCheckPrompt = readFileSync(join(__dirname, "prompts/progress-check-prompt.md"), "utf-8");
 const supervisorPrompt = readFileSync(join(__dirname, TARGETING_MODE === "labels" ? "prompts/supervisor-prompt.md" : "prompts/supervisor-prompt-grid.md"), "utf-8");
 
 export type AgentTaskPlan = {
@@ -285,6 +286,65 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return JSON.parse(replyStr) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
         } catch (e) {
             console.error("Failed to parse supervisor reply:", e);
+            return null;
+        }
+    }
+
+    /**
+     * Asked when a task runs out of step/time budget: is the agent still making real progress
+     * (worth more budget) or genuinely stuck? Null if the check itself fails — the caller then
+     * treats the agent as stuck, as it did before this check existed.
+     */
+    async function checkProgress(mainTask: string, plan: AgentTaskPlan, currentTaskIndex: number, screenshot: string | undefined): Promise<{ progressing: boolean; reason?: string } | null> {
+        throwIfStopped();
+        pendingFetchAbortController = new AbortController();
+        let response: Response;
+        try {
+            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    agentRole: "supervisor",
+                    messages: [
+                        { role: "system", content: progressCheckPrompt },
+                        {
+                            role: "user",
+                            content: [
+                                `Main task: ${JSON.stringify(mainTask)}`,
+                                `Current macro task index: ${currentTaskIndex}`,
+                                `Current macro task: ${JSON.stringify(plan.tasks[currentTaskIndex] ?? "")}`,
+                                `Full plan: ${JSON.stringify(plan.tasks)}`,
+                                `Recent actions: ${JSON.stringify(past_actions.slice(-15))}`,
+                                `Agent's notepad:\n${agentNotes || "(empty)"}`,
+                            ].join("\n"),
+                        },
+                    ],
+                    ...(screenshot ? { imageUrl: screenshot } : {}),
+                }),
+                signal: pendingFetchAbortController.signal,
+            });
+        } catch (error) {
+            if (error instanceof Error && error.name === "AbortError") {
+                if (agentStopped) throw new AgentStoppedError();
+                if (agentPaused) throw new AgentPausedError();
+            }
+            console.error("Progress check failed:", error);
+            return null;
+        } finally {
+            pendingFetchAbortController = null;
+        }
+        throwIfStopped();
+        if (!response.ok) {
+            console.error(`Progress check endpoint error ${response.status}:`, await response.text());
+            return null;
+        }
+        try {
+            const data = await response.json();
+            const reply = typeof data.reply === "string" ? data.reply : JSON.stringify(data.reply);
+            const parsed = JSON.parse(reply);
+            return typeof parsed?.progressing === "boolean" ? parsed : null;
+        } catch (e) {
+            console.error("Failed to parse progress check reply:", e);
             return null;
         }
     }
@@ -1595,6 +1655,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     const MAX_ITERATIONS_PER_TASK = 40;
     const MAX_TASK_DURATION_MS = 5 * 60 * 1000;
+    /** Times the supervisor may grant a fresh step/time budget to a task it judges to be progressing. */
+    const MAX_BUDGET_EXTENSIONS_PER_TASK = 2;
     const MAX_SUPERVISOR_INTERVENTIONS_PER_TASK = 3;
     /** Steps to let a refined prompt run before the repetition check may fire again. */
     const SUPERVISOR_COOLDOWN_STEPS = 4;
@@ -1847,7 +1909,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                 // after an intervention so the refined prompt gets a real chance to work
                 // instead of being re-judged (and re-triggering) on the very next step.
                 let supervisorCooldown = 0;
-                const taskStartTime = Date.now();
+                let taskStartTime = Date.now();
+                let budgetExtensions = 0;
+                let lastScreenshot: string | undefined;
 
                 while (true) {
                     try {
@@ -1860,8 +1924,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         iterationCount++;
                         if (iterationCount > MAX_ITERATIONS_PER_TASK || Date.now() - taskStartTime > MAX_TASK_DURATION_MS) {
                             console.error(`Agent exceeded step/time budget for task: "${currentTask}"`);
-                            emit("agent:warn", `Agent gave up on task after too many steps: "${currentTask}"`);
-                            return finalAnswer;
+                            // Before giving up, ask the supervisor whether the agent is still progressing.
+                            const progress = budgetExtensions < MAX_BUDGET_EXTENSIONS_PER_TASK
+                                ? await checkProgress(instruction, plan, currentTaskIndex, lastScreenshot)
+                                : null;
+                            if (progress?.progressing) {
+                                budgetExtensions++;
+                                console.log(`Supervisor says the agent is progressing; extending budget (${budgetExtensions}/${MAX_BUDGET_EXTENSIONS_PER_TASK}): ${progress.reason ?? ""}`);
+                                iterationCount = 1;
+                                taskStartTime = Date.now();
+                            } else {
+                                const why = progress?.reason ? ` ${progress.reason}` : "";
+                                emit("agent:warn", `Agent stopped after too many steps because it doesn't seem to be making progress.${why} Task: "${currentTask}"`);
+                                return finalAnswer;
+                            }
                         }
 
                         let promptToUse = overridePrompt || currentTask;
@@ -1881,6 +1957,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                             throw new Error("Failed to take screenshot after all retries.");
                         }
                         const { base64: screenshot, w: ssW, h: ssH, winW, winH, elements, note: screenNote } = screenshotResult;
+                        lastScreenshot = screenshot;
 
                         throwIfStopped();
 
