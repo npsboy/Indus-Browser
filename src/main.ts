@@ -4,6 +4,7 @@ import { ipcMain } from "electron";
 import { readFileSync } from "fs";
 import { AgentRunError, AgentTabClosedError, createAgentRuntime, type AgentRunResumeState, type AgentRuntime, type AgentTabInfo, type AgentTabSurface } from "./agent/agent";
 import { buildSessionInstruction, type AgentRunRequest } from "./agent/session";
+import { askDecider, buildMessages, LlmEndpointError, postLlm, readCompletion, type AgentRole, type LlmMessage } from "./agent/llm";
 import { getMainWindow, setMainWindow } from "./windows";
 import { applyEmulation, getLocationMask, manageSession, parseLocationMask, resetLocationMask, setLocationMask } from "./locationMask";
 import { applyNetworkSettings, applyProxy, applyWebRtcPolicy, attachShieldsToGuest, blockedCountFor, getSettings, gpcEnabledFor, loadSettings, setShieldsForSite, setupShields, shieldsUpFor, siteOf, startFilterEngine, updateSettings } from "./privacy";
@@ -20,19 +21,30 @@ app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
 
-async function postChat(payload: any) {
-    const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-    });
+/**
+ * Turns a chat request from the UI ({ agentRole, messages, imageUrl? }) into an
+ * OpenRouter request body. The conversant gets its system prompt in front.
+ */
+function chatPayload(payload: any, stream: boolean) {
+    const messages: LlmMessage[] = Array.isArray(payload?.messages) ? payload.messages : [];
+    return {
+        messages: buildMessages(
+            payload?.agentRole === "conversant" ? [{ role: "system", content: conversantPrompt }, ...messages] : messages,
+            typeof payload?.imageUrl === "string" ? payload.imageUrl : undefined
+        ),
+        ...(stream ? { stream: true } : {}),
+    };
+}
+
+async function postChat(agentRole: AgentRole, payload: Record<string, unknown>) {
+    const response = await postLlm(agentRole, payload);
 
     if (!response.ok) {
         return { error: true, status: response.status, text: await response.text() };
     }
 
-    const data = await response.json();
-    return { error: false, data };
+    const { reply } = readCompletion(await response.json());
+    return { error: false, data: { reply } };
 }
 
 const BROWSER_PARTITION = "persist:indus-browser";
@@ -709,17 +721,7 @@ ipcMain.on('agent:resume', (_event, sessionId: string) => {
 
 ipcMain.handle('chat-request', async (_event, payload) => {
     try {
-        const requestPayload = payload?.agentRole === "conversant"
-            ? {
-                ...payload,
-                messages: [
-                    { role: "system", content: conversantPrompt },
-                    ...(Array.isArray(payload.messages) ? payload.messages : [])
-                ]
-            }
-            : payload;
-
-        return await postChat(requestPayload);
+        return await postChat(payload?.agentRole, chatPayload(payload, false));
     } catch (error: any) {
         return { error: true, status: 0, text: error.message };
     }
@@ -731,32 +733,17 @@ ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
     const sender = event.sender;
 
     try {
-        const requestPayload = payload?.agentRole === "conversant"
-            ? {
-                ...payload,
-                messages: [
-                    { role: "system", content: conversantPrompt },
-                    ...(Array.isArray(payload.messages) ? payload.messages : [])
-                ]
-            }
-            : payload;
-
-        const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(requestPayload)
-        });
+        const response = await postLlm(payload?.agentRole, chatPayload(payload, true));
 
         if (!response.ok) {
             sender.send(doneChannel, { error: true, status: response.status, text: await response.text() });
             return;
         }
 
-        // Fall back to plain JSON if the backend isn't actually streaming
-        // (e.g. the streaming Worker branch isn't deployed yet).
+        // Fall back to plain JSON if the response isn't actually a stream.
         const contentType = response.headers.get("content-type") || "";
         if (!response.body || !contentType.includes("text/event-stream")) {
-            sender.send(doneChannel, { error: false, data: await response.json() });
+            sender.send(doneChannel, { error: false, data: { reply: readCompletion(await response.json()).reply } });
             return;
         }
 
@@ -778,8 +765,9 @@ ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
                 if (dataStr === "[DONE]") continue;
                 try {
                     const parsed = JSON.parse(dataStr);
-                    if (typeof parsed.delta === "string") {
-                        sender.send(chunkChannel, parsed.delta);
+                    const delta = parsed.choices?.[0]?.delta?.content;
+                    if (typeof delta === "string" && delta) {
+                        sender.send(chunkChannel, delta);
                     }
                 } catch {
                     // ignore malformed SSE payloads
@@ -793,23 +781,22 @@ ipcMain.on('chat-request-stream', async (event, { requestId, payload }) => {
     }
 });
 
-// The backend's `dispatcher` role is Jev, a structured decision model (not an
+// The backend's `decider` role is Jev, a structured decision model (not an
 // LLM): it takes state + typed questions and returns typed answers with
 // probabilities, never prose. So it can't write a chat title.
 const ROUTING_QUESTION = JSON.parse(readFileSync(path.join(__dirname, "agent/prompts/jev/routing-question.json"), "utf-8"));
 const IS_TASK_QUESTION = JSON.parse(readFileSync(path.join(__dirname, "agent/prompts/jev/is-task-question.json"), "utf-8"));
 
 async function askJev(state: Record<string, unknown>, questions: Record<string, unknown>): Promise<{ error: boolean; status?: number; text?: string; answers?: any }> {
-    const result = await postChat({ agentRole: "dispatcher", state, questions });
-    if (result.error) return result;
-    const answers = (result.data as any)?.answers;
-    if (!answers || typeof answers !== "object") {
-        return { error: true, status: 0, text: "Dispatcher returned no answers" };
+    try {
+        return { error: false, answers: await askDecider(state, questions) };
+    } catch (error) {
+        if (error instanceof LlmEndpointError) return { error: true, status: error.status, text: error.body };
+        throw error;
     }
-    return { error: false, answers };
 }
 
-ipcMain.handle('dispatcher-request', async (_event, text: string) => {
+ipcMain.handle('search-route-request', async (_event, text: string) => {
     try {
         const result = await askJev({ search_box_text: text }, { routing: ROUTING_QUESTION });
         if (result.error) return result;
@@ -825,12 +812,14 @@ const SESSION_TITLE_PROMPT = readFileSync(path.join(__dirname, "agent/prompts/se
 
 ipcMain.handle('session:generate-title', async (_event, text: string) => {
     try {
-        const result = await postChat({
-            agentRole: "titler",
-            messages: [
+        // Titles are plain text (no JSON mode) and need little thinking, so keep it fast and cheap.
+        const result = await postChat("titler", {
+            messages: buildMessages([
                 { role: "system", content: SESSION_TITLE_PROMPT },
                 { role: "user", content: String(text).slice(0, 500) }
-            ]
+            ]),
+            reasoning: { effort: "low" },
+            max_tokens: 300,
         });
         if (result.error) return result;
         const reply = (result.data as any)?.reply;

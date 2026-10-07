@@ -240,8 +240,8 @@ function chatStreamRequest(payload: any, onChunk: (delta: string) => void): Prom
     });
 }
 
-function dispatcherRequest(text: string): Promise<any> {
-    return ipcRenderer.invoke('dispatcher-request', text);
+function searchRouteRequest(text: string): Promise<any> {
+    return ipcRenderer.invoke('search-route-request', text);
 }
 
 type LocationMask = { enabled: boolean; proxy: string };
@@ -345,7 +345,7 @@ contextBridge.exposeInMainWorld('api', {
     onOpenUrlInNewTab,
     chatRequest,
     chatStreamRequest,
-    dispatcherRequest,
+    searchRouteRequest,
     classifyChatInput,
     generateSessionTitle
 });

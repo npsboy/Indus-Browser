@@ -1,6 +1,6 @@
 <!--
 Task-specific tips, NOT part of the main agent prompt. A section is sent to the agent only when:
-  - the decision model (Jev, via the backend's dispatcher role) picks it from the descriptions below
+  - the decision model (Jev, via the backend's decider role) picks it from the descriptions below
     for the current situation (labelled as automatically added, possibly not useful), or
   - the agent asks for it with the get_tips tool (by topic id).
 Format: "## <topic-id> | <one-line description>" followed by the tip text.

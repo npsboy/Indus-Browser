@@ -90,7 +90,7 @@ declare global {
       onOpenUrlInNewTab: (callback: (_event: any, url: string, info?: { disposition?: string; openerId?: number }) => void) => (() => void);
       chatRequest: (payload: any) => Promise<any>;
       chatStreamRequest: (payload: any, onChunk: (delta: string) => void) => Promise<any>;
-      dispatcherRequest: (text: string) => Promise<any>;
+      searchRouteRequest: (text: string) => Promise<any>;
       classifyChatInput: (text: string) => Promise<any>;
       generateSessionTitle: (text: string) => Promise<any>;
     };

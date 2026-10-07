@@ -57,20 +57,27 @@ function parseIsTask(value: unknown): boolean | null {
   return null;
 }
 
+/**
+ * Asks Jev (via main's classify-chat-input) whether `text` is a browser task rather
+ * than chat. Best-effort: a failure or timeout counts as "not a task".
+ */
+export async function classifyAsTask(text: string): Promise<boolean> {
+  try {
+    const request = window.api?.classifyChatInput?.(text);
+    if (!request) return false;
+    const response = await withTimeout<ApiResponse>(request, 2500);
+    return !response?.error && parseIsTask(response?.data) === true;
+  } catch {
+    return false;
+  }
+}
+
 export function useTaskSuggestion() {
   const [pendingTaskSuggestion, setPendingTaskSuggestion] = useState<string | null>(null);
 
   async function suggest(text: string) {
-    try {
-      const request = window.api?.classifyChatInput?.(text);
-      if (!request) return;
-      const response = await withTimeout<ApiResponse>(request, 2500);
-      const isTask = !response?.error ? parseIsTask(response?.data) : null;
-      if (isTask) {
-        setPendingTaskSuggestion(text);
-      }
-    } catch {
-      // Classification is best-effort; silently skip the suggestion on failure.
+    if (await classifyAsTask(text)) {
+      setPendingTaskSuggestion(text);
     }
   }
 

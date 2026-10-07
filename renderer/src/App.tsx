@@ -13,7 +13,7 @@ import NewTabPage from "./pages/NewTabPage";
 import ChatPage from "./pages/ChatPage";
 import { useLoadingText } from "./hooks/useLoadingText";
 import { useImageAttachment } from "./hooks/useImageAttachment";
-import { useTaskSuggestion } from "./hooks/useTaskSuggestion";
+import { classifyAsTask, useTaskSuggestion } from "./hooks/useTaskSuggestion";
 import HistoryPage, { type HistoryEntry } from "./pages/HistoryPage";
 import CookiesPage from "./pages/CookiesPage";
 import ContextMenu, { type ContextMenuState, type MenuItem } from "./components/ContextMenu";
@@ -28,6 +28,10 @@ const SETTINGS_URL = "indus://settings";
 const TAB_STATE_STORAGE_KEY = "indus-browser.tabs.v1";
 const HISTORY_STORAGE_KEY = "indus-browser.history.v1";
 const SIDEBAR_SESSIONS_STORAGE_KEY = "indus-browser.sidebar-sessions.v1";
+
+// Auto mode asks Jev whether each message is a browser task (run the agent) or chat (reply).
+type AssistantMode = 'agent' | 'chat' | 'auto';
+const ASSISTANT_MODE_LABELS: Record<AssistantMode, string> = { auto: 'Auto', agent: 'Agent', chat: 'Chat' };
 const DEVTOOLS_WIDTH_STORAGE_KEY = "indus-browser.devtools-width.v1";
 // This window's identity, fixed for its lifetime (main.ts createWindow).
 // Incognito windows browse in an in-memory partition, record no history and
@@ -101,7 +105,7 @@ function friendlyLoadError(code: number, host: string) {
   if (code <= -200 && code > -300) return "Your connection to this site is not private.";
   return "The page couldn’t be loaded.";
 }
-type DispatcherRoute = {
+type SearchRoute = {
   routing: "web-search" | "ai-chat";
   chatTitle?: string;
 };
@@ -269,7 +273,7 @@ function loadPersistedTabs(): Tab[] {
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
-      reject(new Error("Dispatcher request timed out"));
+      reject(new Error("Search route request timed out"));
     }, timeoutMs);
 
     promise.then(
@@ -285,7 +289,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-function parseDispatcherJson(text: string): DispatcherRoute | null {
+function parseSearchRouteJson(text: string): SearchRoute | null {
   const trimmed = text
     .trim()
     .replace(/^```(?:json)?/i, "")
@@ -294,24 +298,24 @@ function parseDispatcherJson(text: string): DispatcherRoute | null {
 
   try {
     const parsed = JSON.parse(trimmed);
-    return parseDispatcherRoute(parsed);
+    return parseSearchRoute(parsed);
   } catch {
     const routingMatch = trimmed.match(/routing\s*[:=]\s*["']?(web-search|ai-chat)["']?/i);
     if (!routingMatch) return null;
 
     const chatTitleMatch = trimmed.match(/chatTitle\s*[:=]\s*["']([^"']+)["']/i);
     return {
-      routing: routingMatch[1] as DispatcherRoute["routing"],
+      routing: routingMatch[1] as SearchRoute["routing"],
       chatTitle: chatTitleMatch?.[1],
     };
   }
 }
 
-function parseDispatcherRoute(value: unknown): DispatcherRoute | null {
+function parseSearchRoute(value: unknown): SearchRoute | null {
   if (!value) return null;
 
   if (typeof value === "string") {
-    return parseDispatcherJson(value);
+    return parseSearchRouteJson(value);
   }
 
   if (typeof value !== "object") return null;
@@ -325,7 +329,7 @@ function parseDispatcherRoute(value: unknown): DispatcherRoute | null {
   }
 
   for (const key of ["reply", "output", "message", "content", "data"]) {
-    const nested = parseDispatcherRoute(data[key]);
+    const nested = parseSearchRoute(data[key]);
     if (nested) return nested;
   }
 
@@ -1007,7 +1011,9 @@ function App() {
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [showMouseCoords]);
-  type ChatMessage = { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor'; text: string };
+  // A 'mode' message marks where the conversation switched between chat and the agent; its text is the side it switched to.
+  type ChatMessage = { role: 'user' | 'agent' | 'reply' | 'warning' | 'supervisor' | 'mode'; text: string };
+  type AgentHistoryMessage = ChatMessage & { role: Exclude<ChatMessage['role'], 'mode'> };
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   // The agent's notepad (its short-term memory), mirrored live from main. It belongs to
   // the sidebar conversation: saved with it, and sent into every agent run in it.
@@ -1031,7 +1037,7 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [agentCursor, setAgentCursor] = useState<{ x: number; y: number } | null>(null);
   const [showAssistant, setShowAssistant] = useState(false);
-  const [assistantMode, setAssistantMode] = useState<'agent' | 'chat'>('agent');
+  const [assistantMode, setAssistantMode] = useState<AssistantMode>('agent');
   // Chat-mode conversation history sent to the conversant backend (separate from
   // chatMessages, which also mixes in agent-mode action steps).
   const [chatHistory, setChatHistory] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
@@ -1041,7 +1047,7 @@ function App() {
 
   type SidebarSession = {
     id: string;
-    mode: 'agent' | 'chat';
+    mode: AssistantMode;
     title: string;
     messages: ChatMessage[];
     chatHistory: { role: 'user' | 'assistant'; content: string }[];
@@ -1068,6 +1074,11 @@ function App() {
     setCurrentSessionIdState(id);
   }
   const [showSessionHistory, setShowSessionHistory] = useState(false);
+  // Read by agent event listeners, which are registered once.
+  const assistantModeRef = useRef(assistantMode);
+  assistantModeRef.current = assistantMode;
+  // Conversations that were in Chat mode when a task was handed to the agent; they go back to Chat when it finishes.
+  const handedOffSessionsRef = useRef(new Set<string>());
 
   useEffect(() => {
     try {
@@ -1094,18 +1105,18 @@ function App() {
     const firstUserMessage = chatMessages.find(m => m.role === 'user')?.text;
     // Also covers a chat that was handed to the agent: it starts as a chat session, so it's titled once the agent is running in it.
     const alreadyTitled = sidebarSessionsRef.current.find(s => s.id === currentSessionId)?.titled;
-    if (assistantMode === 'agent' && firstUserMessage && !alreadyTitled && !titleRequestedRef.current.has(currentSessionId)) {
+    if (assistantMode !== 'chat' && firstUserMessage && !alreadyTitled && !titleRequestedRef.current.has(currentSessionId)) {
       titleRequestedRef.current.add(currentSessionId);
       requestSessionTitle(currentSessionId, firstUserMessage);
     }
-    const title = firstUserMessage?.slice(0, 40) || (assistantMode === 'agent' ? 'Agent task' : 'Chat');
+    const title = firstUserMessage?.slice(0, 40) || (assistantMode === 'agent' ? 'Agent task' : ASSISTANT_MODE_LABELS[assistantMode]);
 
     setSidebarSessions(prev => {
       const existing = prev.find(s => s.id === currentSessionId);
       let updated: SidebarSession[];
       if (existing) {
         updated = prev.map(s =>
-          s.id === currentSessionId ? { ...s, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() } : s
+          s.id === currentSessionId ? { ...s, mode: assistantMode, messages: chatMessages, chatHistory, agentNotes, updatedAt: Date.now() } : s
         );
       } else {
         updated = [
@@ -1455,11 +1466,17 @@ function App() {
     const history: ChatMessage[] = chatTabHistory
       ? chatTabHistory.map(m => ({ role: m.role === 'user' ? 'user' : 'reply', text: m.content }))
       : chatMessages;
+    // A task from the Chat tab isn't in this conversation yet, so show it before the switch.
+    const handoff: ChatMessage[] = [...(chatTabHistory ? [{ role: 'user' as const, text: taskText }] : []), { role: 'mode', text: 'agent' }];
 
     taskSuggestion.clear();
     setShowAssistant(true);
-    setAssistantMode('agent');
-    setChatMessages(prev => [...prev, { role: 'agent', text: `Switched to Agent mode for: "${taskText}"` }]);
+    // Auto mode already runs tasks itself, so it stays in Auto; a chat continues as an agent conversation.
+    if (assistantMode === 'chat') {
+      handedOffSessionsRef.current.add(currentSessionIdRef.current);
+      setAssistantMode('agent');
+    }
+    setChatMessages(prev => [...prev, ...handoff]);
     // The whole conversation (including the chat that led here) and its notepad go along.
     launchAgent(taskText, history);
   }
@@ -1473,33 +1490,106 @@ function App() {
     const sessionId = currentSessionIdRef.current;
     claimAgentTab(sessionId);
     setAgentRunState(sessionId, { paused: false });
-    window.api?.runAgentInstruction({ sessionId, text, history, notes: agentNotes });
+    const agentHistory = history.filter((m): m is AgentHistoryMessage => m.role !== 'mode');
+    window.api?.runAgentInstruction({ sessionId, text, history: agentHistory, notes: agentNotes });
+  }
+
+  /** Whether the conversation's last answer came from the agent or from chat; null if nothing has answered yet. */
+  function lastRoute(messages: ChatMessage[]): 'agent' | 'chat' | null {
+    let sawReply = false;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const { role, text } = messages[i];
+      if (role === 'mode') return text === 'agent' ? 'agent' : 'chat';
+      if (role === 'agent') return 'agent';
+      if (role === 'reply') sawReply = true;
+      // A reply with no agent steps between it and its user message was a chat reply.
+      else if (role === 'user' && sawReply) return 'chat';
+    }
+    return sawReply ? 'chat' : null;
+  }
+
+  /**
+   * Called when a conversation's agent run ends. In Auto (and in a Chat conversation that
+   * was handed to the agent) the conversation goes back to chat, which is marked in it.
+   */
+  function returnToChat(sessionId: string) {
+    const isOpen = sessionId === currentSessionIdRef.current;
+    const handedOff = handedOffSessionsRef.current.delete(sessionId);
+    const mode = isOpen ? assistantModeRef.current : sidebarSessionsRef.current.find(s => s.id === sessionId)?.mode;
+    if (!handedOff && mode !== 'auto') return;
+    updateSessionMessages(sessionId, prev => {
+      const last = prev[prev.length - 1];
+      return last?.role === 'mode' && last.text === 'chat' ? prev : [...prev, { role: 'mode', text: 'chat' }];
+    });
+    if (!handedOff) return;
+    if (isOpen) setAssistantMode('chat');
+    else setSidebarSessions(prev => prev.map(s => s.id === sessionId ? { ...s, mode: 'chat' } : s));
+  }
+
+  /** A switch marker if a message going to `route` changes sides from the conversation so far (`messages`). */
+  function routeSwitchNotice(route: 'agent' | 'chat', messages: ChatMessage[]): ChatMessage[] {
+    // A new conversation starts on its mode's side (Auto starts as chat).
+    const previous = lastRoute(messages) ?? (assistantMode === 'agent' ? 'agent' : 'chat');
+    return previous === route ? [] : [{ role: 'mode', text: route }];
   }
 
   async function handleAgentSend() {
     const text = chatInput.trim();
     if (!text) return;
-    if (assistantMode === 'chat' && isChatLoading) return;
+    if (assistantMode !== 'agent' && isChatLoading) return;
 
     setChatInput("");
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
 
-    if (assistantMode === 'agent') {
-      setChatMessages(prev => [...prev, { role: 'user', text }]);
+    // In Auto, a message sent while this conversation's agent is running is a follow-up for it.
+    if (assistantMode === 'agent' || (assistantMode === 'auto' && isAgentRunning)) {
+      setChatMessages(prev => [...prev, { role: 'user', text }, ...routeSwitchNotice('agent', chatMessages)]);
       // Send the conversation so far and its notepad, so a follow-up like "I meant
       // wired earphones" is read against the earlier request rather than on its own.
       launchAgent(text, chatMessages);
       return;
     }
 
-    // Chat mode
     const attachedImage = imageAttachment.pendingImage;
     imageAttachment.clear();
     taskSuggestion.clear();
     setChatMessages(prev => [...prev, { role: 'user', text }]);
 
+    if (assistantMode === 'auto') {
+      // The agent can't use an attached image, so a message with one is always chat.
+      const sessionId = currentSessionIdRef.current;
+      setIsChatLoading(true);
+      const isTask = !attachedImage && await classifyAsTask(text);
+      if (sessionId !== currentSessionIdRef.current) {
+        // You switched conversations while Jev was deciding; don't act in the new one.
+        setIsChatLoading(false);
+        return;
+      }
+      const notice = routeSwitchNotice(isTask ? 'agent' : 'chat', chatMessages);
+      if (notice.length) setChatMessages(prev => [...prev, ...notice]);
+      if (isTask) {
+        setIsChatLoading(false);
+        launchAgent(text, chatMessages);
+        return;
+      }
+      // Agent runs add to this conversation too, so chat replies are built from all of it
+      // (chatHistory only has the chat turns).
+      const history = [
+        ...chatMessages
+          .filter(m => m.role === 'user' || m.role === 'reply')
+          .map(m => ({ role: m.role === 'user' ? 'user' as const : 'assistant' as const, content: m.text })),
+        { role: 'user' as const, content: text },
+      ];
+      setChatHistory(prev => [...prev, { role: 'user', content: text }]);
+      await requestChatReply(history, attachedImage?.dataUrl);
+      return;
+    }
+
+    // Chat mode
+    const notice = routeSwitchNotice('chat', chatMessages);
+    if (notice.length) setChatMessages(prev => [...prev, ...notice]);
     const updatedHistory = [...chatHistory, { role: 'user' as const, content: text }];
     setChatHistory(updatedHistory);
 
@@ -1511,6 +1601,7 @@ function App() {
   function handleAgentStop() {
     window.api?.stopAgent(currentSessionId);
     setAgentRunState(currentSessionId, null);
+    returnToChat(currentSessionId);
     setAgentCursor(null);
   }
 
@@ -1547,6 +1638,7 @@ function App() {
       if (answer && answer.trim()) {
         updateSessionMessages(sessionId, prev => [...prev, { role: 'reply', text: answer.trim() }]);
       }
+      returnToChat(sessionId);
     });
     return () => cleanup?.();
   }, []);
@@ -2102,14 +2194,14 @@ function App() {
       return;
     }
     try {
-      const dispatcherRequest = window.api?.dispatcherRequest?.(query);
-      if (!dispatcherRequest) {
+      const searchRouteRequest = window.api?.searchRouteRequest?.(query);
+      if (!searchRouteRequest) {
         navigateActiveTabToUrl(webSearchUrl(query));
         return;
       }
 
-      const response = await withTimeout<ApiResponse>(dispatcherRequest, 2000);
-      const route = !response?.error ? parseDispatcherRoute(response?.data) : null;
+      const response = await withTimeout<ApiResponse>(searchRouteRequest, 2000);
+      const route = !response?.error ? parseSearchRoute(response?.data) : null;
       await playNewTabExit();
 
       if (route?.routing === "web-search") {
@@ -2124,7 +2216,7 @@ function App() {
       }
       navigateActiveTabToUrl(chatUrl.toString());
     } catch (error) {
-      console.error("Dispatcher route failed", error);
+      console.error("Search route failed", error);
       setNewTabRoutingError("Couldn't reach the AI router — showing a web search instead.");
       window.setTimeout(() => setNewTabRoutingError(null), 4000);
       navigateActiveTabToUrl(webSearchUrl(query));
@@ -3356,7 +3448,7 @@ function App() {
               }}
             />
             <div className="assistant-sidebar-top">
-              <span className="assistant-sidebar-title">{assistantMode === 'agent' ? 'Agent' : 'Chat'}</span>
+              <span className="assistant-sidebar-title">{ASSISTANT_MODE_LABELS[assistantMode]}</span>
               <div className="assistant-sidebar-top-actions">
                 <button
                   type="button"
@@ -3378,7 +3470,7 @@ function App() {
                 </button>
               </div>
             </div>
-            {assistantMode === 'agent' && !showSessionHistory && receivedTips.length > 0 && (
+            {showAgentPanels && receivedTips.length > 0 && (
               <div className="agent-notepad">
                 <button
                   type="button"
@@ -3427,7 +3519,7 @@ function App() {
                 )}
               </div>
             )}
-            {assistantMode === 'agent' && !showSessionHistory && agentNotes.trim() && (() => {
+            {showAgentPanels && agentNotes.trim() && (() => {
               const notes = agentNotes
                 .split('\n')
                 .map(line => line.replace(/^\s*[-*•]\s*/, '').trim())
@@ -3485,7 +3577,7 @@ function App() {
             {showSessionHistory ? (
               <div className="assistant-session-history">
                 {sidebarSessions.filter(s => s.mode === assistantMode).length === 0 ? (
-                  <div className="assistant-session-empty">No {assistantMode === 'agent' ? 'agent' : 'chat'} sessions yet.</div>
+                  <div className="assistant-session-empty">No {ASSISTANT_MODE_LABELS[assistantMode].toLowerCase()} sessions yet.</div>
                 ) : (
                   sidebarSessions
                     .filter(s => s.mode === assistantMode)
@@ -3520,7 +3612,7 @@ function App() {
               {chatMessages.length === 0 ? (
                 <div className="assistant-empty-state">
                   <img src={logo} alt="Agent" className="agent-logo-large" />
-                  <h2>{assistantMode === 'agent' ? 'Agent' : 'Chat'}</h2>
+                  <h2>{ASSISTANT_MODE_LABELS[assistantMode]}</h2>
                 </div>
               ) : (
                 (() => {
@@ -3560,6 +3652,15 @@ function App() {
                             <div className="chat-bubble chat-bubble-reply markdown-content">
                               <ReactMarkdown>{msg.text}</ReactMarkdown>
                             </div>
+                          </div>
+                        );
+                      }
+                      if (msg.role === 'mode') {
+                        const toAgent = msg.text === 'agent';
+                        return (
+                          <div key={i} className="chat-mode-switch" role="separator">
+                            <span className="material-symbols-outlined">{toAgent ? 'smart_toy' : 'chat_bubble'}</span>
+                            Switched to {toAgent ? 'Agent' : 'Chat'}
                           </div>
                         );
                       }
@@ -3654,7 +3755,7 @@ function App() {
                   });
                 })()
               )}
-              {assistantMode === 'chat' && chatStreamingReply !== null && (
+              {assistantMode !== 'agent' && chatStreamingReply !== null && (
                 <div className="chat-message chat-message-reply">
                   <div className="chat-reply-header">
                     <img src={logo} alt="Indus" className="agent-action-logo" />
@@ -3664,7 +3765,7 @@ function App() {
                   </div>
                 </div>
               )}
-              {assistantMode === 'chat' && isChatLoading && chatStreamingReply === null && (
+              {assistantMode !== 'agent' && isChatLoading && chatStreamingReply === null && (
                 <div className="chat-message chat-message-reply">
                   <span className="chat-bubble chat-bubble-reply chat-bubble-loading">{chatLoadingText}</span>
                 </div>
@@ -3710,7 +3811,7 @@ function App() {
                   )}
                 </div>
               )}
-              {assistantMode === 'chat' && imageAttachment.pendingImage && (
+              {assistantMode !== 'agent' && imageAttachment.pendingImage && (
                 <div className="pending-attachment-chip">
                   <img
                     src={imageAttachment.pendingImage.dataUrl}
@@ -3728,21 +3829,21 @@ function App() {
                   </button>
                 </div>
               )}
-              {assistantMode === 'chat' && imageAttachment.error && (
+              {assistantMode !== 'agent' && imageAttachment.error && (
                 <div className="pending-attachment-error">{imageAttachment.error}</div>
               )}
               <div className="assistant-input-row">
                 <textarea
                   ref={textareaRef}
-                  placeholder={assistantMode === 'agent' ? "Assign any task..." : "Ask anything..."} 
+                  placeholder={assistantMode === 'agent' ? "Assign any task..." : assistantMode === 'auto' ? "Ask anything or assign a task..." : "Ask anything..."} 
                   className="assistant-text-input"
                   autoFocus
                   rows={1}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onInput={handleInputResize}
-                  onPaste={assistantMode === 'chat' ? imageAttachment.handlePaste : undefined}
-                  onDrop={assistantMode === 'chat' ? imageAttachment.handleDrop : undefined}
+                  onPaste={assistantMode !== 'agent' ? imageAttachment.handlePaste : undefined}
+                  onDrop={assistantMode !== 'agent' ? imageAttachment.handleDrop : undefined}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -3765,14 +3866,14 @@ function App() {
                   <button
                     className="assistant-send-button"
                     onClick={handleAgentSend}
-                    disabled={assistantMode === 'chat' && isChatLoading}
+                    disabled={assistantMode !== 'agent' && isChatLoading}
                   >
                     ➤
                   </button>
                 )}
               </div>
               <div className="assistant-input-footer">
-                {assistantMode === 'chat' && (
+                {assistantMode !== 'agent' && (
                   <>
                     <input {...imageAttachment.fileInputProps} />
                     <button
@@ -3791,7 +3892,7 @@ function App() {
                     className="assistant-mode-button" 
                     onClick={() => setShowAssistantMenu(!showAssistantMenu)}
                   >
-                    {assistantMode === 'agent' ? 'Agent' : 'Chat'}
+                    {ASSISTANT_MODE_LABELS[assistantMode]}
                     <span className="dropdown-icon" aria-hidden="true">
                       <svg width="10" height="6" viewBox="0 0 10 6" fill="none">
                         <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -3801,18 +3902,16 @@ function App() {
                   
                   {showAssistantMenu && (
                     <div className="assistant-mode-menu">
-                      <div 
-                        className="assistant-mode-item" 
-                        onClick={() => { setAssistantMode('agent'); setShowAssistantMenu(false); }}
-                      >
-                        Agent
-                      </div>
-                      <div 
-                        className="assistant-mode-item" 
-                        onClick={() => { setAssistantMode('chat'); setShowAssistantMenu(false); }}
-                      >
-                        Chat
-                      </div>
+                      {(['auto', 'agent', 'chat'] as const).map(mode => (
+                        <div
+                          key={mode}
+                          className="assistant-mode-item"
+                          title={mode === 'auto' ? 'Decides for each message whether to chat or run the agent' : undefined}
+                          onClick={() => { setAssistantMode(mode); setShowAssistantMenu(false); }}
+                        >
+                          {ASSISTANT_MODE_LABELS[mode]}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>

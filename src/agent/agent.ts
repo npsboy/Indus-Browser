@@ -16,6 +16,8 @@ import {
 } from "./elementLabeler";
 import { pressKeyInBackground, scrollInBackground, typeInBackground } from "./backgroundInput";
 import { GRID_MODE_TOOLS } from "./gridTools";
+import { LABEL_MODE_TOOLS } from "./labelTools";
+import { askDecider, buildMessages, jsonModePayload, postLlm, readCompletion } from "./llm";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -194,28 +196,17 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
-            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    agentRole: "planner",
-                    messages: [
-                        { role: "system", content: plannerPrompt },
-                        {
-                            role: "user",
-                            // On a follow-up, the notepad says what's already done (including the
-                            // previous plan's checklist), so the new plan covers only what's left.
-                            content: `This is the user's request. "${userPrompt}"` + (agentNotes
-                                ? `\n\nThe agent's notepad from earlier in this conversation (what was already done and found):\n${agentNotes}`
-                                : ""),
-                        }
-                    ],
-                    ...(screenshot ? { imageUrl: screenshot } : {}),
-                }),
-                signal: pendingFetchAbortController.signal,
-            });
+            response = await postLlm("planner", jsonModePayload([
+                { role: "system", content: plannerPrompt },
+                {
+                    role: "user",
+                    // On a follow-up, the notepad says what's already done (including the
+                    // previous plan's checklist), so the new plan covers only what's left.
+                    content: `This is the user's request. "${userPrompt}"` + (agentNotes
+                        ? `\n\nThe agent's notepad from earlier in this conversation (what was already done and found):\n${agentNotes}`
+                        : ""),
+                }
+            ], screenshot), pendingFetchAbortController.signal);
         } catch (error) {
             if (error instanceof Error && error.name === "AbortError") {
                 if (agentStopped) throw new AgentStoppedError();
@@ -227,15 +218,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         }
 
         throwIfStopped();
-        const data = await response.json();
+        if (!response.ok) {
+            console.error(`Planner endpoint error ${response.status}:`, await response.text());
+            return null;
+        }
         try {
-            let replyStr: string;
-            if (typeof data.reply === "string") {
-                replyStr = data.reply;
-            } else {
-                replyStr = JSON.stringify(data.reply);
-            }
-            return JSON.parse(replyStr) as PlannerReply;
+            return JSON.parse(readCompletion(await response.json()).reply) as PlannerReply;
         } catch (e) {
             console.error("Failed to parse planner reply:", e);
             return null;
@@ -243,31 +231,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     }
 
     /**
-     * Cheap gate in front of the supervisor: asks the decision model (Jev, via the dispatcher role)
+     * Cheap gate in front of the supervisor: asks the decision model (Jev, via the decider role)
      * whether the repeated actions look like a stuck loop or like progress (e.g. moves in a game).
      * Only a confident "progressing" skips the supervisor; anything else (stuck, escalate —
      * needs a screenshot or a smarter model —, low confidence, an error) hands over to it.
      */
     async function jevSeesStuckLoop(mainTask: string, currentTask: string, repeatedAction: PastAction): Promise<boolean> {
         try {
-            const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    agentRole: "dispatcher",
-                    state: {
-                        task: mainTask,
-                        current_step: currentTask,
-                        repeated_action: `${repeatedAction.tool}: ${repeatedAction.explanation ?? ""}`,
-                        recent_actions: past_actions.slice(-10).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
-                        agent_notepad: agentNotes.slice(-1000),
-                    },
-                    questions: { stuck: repetitionQuestion },
-                }),
-                signal: AbortSignal.timeout(5000),
-            });
-            if (!response.ok) throw new Error(`dispatcher returned ${response.status}`);
-            const answer = (await response.json())?.answers?.stuck;
+            const answers = await askDecider({
+                task: mainTask,
+                current_step: currentTask,
+                repeated_action: `${repeatedAction.tool}: ${repeatedAction.explanation ?? ""}`,
+                recent_actions: past_actions.slice(-10).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
+                agent_notepad: agentNotes.slice(-1000),
+            }, { stuck: repetitionQuestion }, AbortSignal.timeout(5000));
+            const answer = answers.stuck;
             console.log(`[Agent] repetition check: ${answer?.choice} (confidence ${answer?.confidence})`);
             return !(answer?.choice === "progressing" && typeof answer.confidence === "number" && answer.confidence >= REPETITION_CHECK_MIN_CONFIDENCE);
         } catch (error) {
@@ -283,32 +261,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
-            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    agentRole: "supervisor",
-                    messages: [
-                        { role: "system", content: supervisorPrompt },
-                        {
-                            role: "user",
-                            content: [
-                                `Main task: ${JSON.stringify(mainTask)}`,
-                                `Current macro task index: ${currentTaskIndex}`,
-                                `Current macro task: ${JSON.stringify(currentTask)}`,
-                                `Full plan: ${JSON.stringify(plan.tasks)}`,
-                                `Recent actions: ${JSON.stringify(recentActions)}`,
-                                `Agent's notepad (its short-term memory):\n${agentNotes || "(empty)"}`,
-                                supervisorInstruction
-                            ].join("\n")
-                        }
-                    ],
-                    imageUrl: screenshot
-                }),
-                signal: pendingFetchAbortController.signal,
-            });
+            response = await postLlm("supervisor", jsonModePayload([
+                { role: "system", content: supervisorPrompt },
+                {
+                    role: "user",
+                    content: [
+                        `Main task: ${JSON.stringify(mainTask)}`,
+                        `Current macro task index: ${currentTaskIndex}`,
+                        `Current macro task: ${JSON.stringify(currentTask)}`,
+                        `Full plan: ${JSON.stringify(plan.tasks)}`,
+                        `Recent actions: ${JSON.stringify(recentActions)}`,
+                        `Agent's notepad (its short-term memory):\n${agentNotes || "(empty)"}`,
+                        supervisorInstruction
+                    ].join("\n")
+                }
+            ], screenshot), pendingFetchAbortController.signal);
         } catch (error) {
             if (error instanceof Error && error.name === "AbortError") {
                 if (agentStopped) throw new AgentStoppedError();
@@ -326,15 +293,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
 
-        const data = await response.json();
         try {
-            let replyStr: string;
-            if (typeof data.reply === "string") {
-                replyStr = data.reply;
-            } else {
-                replyStr = JSON.stringify(data.reply);
-            }
-            return JSON.parse(replyStr) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
+            return JSON.parse(readCompletion(await response.json()).reply) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
         } catch (e) {
             console.error("Failed to parse supervisor reply:", e);
             return null;
@@ -351,29 +311,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
-            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    agentRole: "supervisor",
-                    messages: [
-                        { role: "system", content: progressCheckPrompt },
-                        {
-                            role: "user",
-                            content: [
-                                `Main task: ${JSON.stringify(mainTask)}`,
-                                `Current macro task index: ${currentTaskIndex}`,
-                                `Current macro task: ${JSON.stringify(plan.tasks[currentTaskIndex] ?? "")}`,
-                                `Full plan: ${JSON.stringify(plan.tasks)}`,
-                                `Recent actions: ${JSON.stringify(past_actions.slice(-15))}`,
-                                `Agent's notepad:\n${agentNotes || "(empty)"}`,
-                            ].join("\n"),
-                        },
-                    ],
-                    ...(screenshot ? { imageUrl: screenshot } : {}),
-                }),
-                signal: pendingFetchAbortController.signal,
-            });
+            response = await postLlm("supervisor", jsonModePayload([
+                { role: "system", content: progressCheckPrompt },
+                {
+                    role: "user",
+                    content: [
+                        `Main task: ${JSON.stringify(mainTask)}`,
+                        `Current macro task index: ${currentTaskIndex}`,
+                        `Current macro task: ${JSON.stringify(plan.tasks[currentTaskIndex] ?? "")}`,
+                        `Full plan: ${JSON.stringify(plan.tasks)}`,
+                        `Recent actions: ${JSON.stringify(past_actions.slice(-15))}`,
+                        `Agent's notepad:\n${agentNotes || "(empty)"}`,
+                    ].join("\n"),
+                },
+            ], screenshot), pendingFetchAbortController.signal);
         } catch (error) {
             if (error instanceof Error && error.name === "AbortError") {
                 if (agentStopped) throw new AgentStoppedError();
@@ -390,9 +341,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
         try {
-            const data = await response.json();
-            const reply = typeof data.reply === "string" ? data.reply : JSON.stringify(data.reply);
-            const parsed = JSON.parse(reply);
+            const parsed = JSON.parse(readCompletion(await response.json()).reply);
             return typeof parsed?.progressing === "boolean" ? parsed : null;
         } catch (e) {
             console.error("Failed to parse progress check reply:", e);
@@ -410,26 +359,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
-            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    agentRole: "supervisor",
-                    messages: [
-                        { role: "system", content: completionCheckPrompt },
-                        {
-                            role: "user",
-                            content: [
-                                `Overall request:\n${overallRequest}`,
-                                `Agent's notepad:\n${agentNotes || "(empty)"}`,
-                                `Recent actions: ${JSON.stringify(past_actions.slice(-12))}`,
-                                `Final answer: ${JSON.stringify(answer)}`,
-                            ].join("\n\n"),
-                        },
-                    ],
-                }),
-                signal: pendingFetchAbortController.signal,
-            });
+            response = await postLlm("supervisor", jsonModePayload([
+                { role: "system", content: completionCheckPrompt },
+                {
+                    role: "user",
+                    content: [
+                        `Overall request:\n${overallRequest}`,
+                        `Agent's notepad:\n${agentNotes || "(empty)"}`,
+                        `Recent actions: ${JSON.stringify(past_actions.slice(-12))}`,
+                        `Final answer: ${JSON.stringify(answer)}`,
+                    ].join("\n\n"),
+                },
+            ]), pendingFetchAbortController.signal);
         } catch (error) {
             if (error instanceof Error && error.name === "AbortError") {
                 if (agentStopped) throw new AgentStoppedError();
@@ -446,9 +387,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
         try {
-            const data = await response.json();
-            const reply = typeof data.reply === "string" ? data.reply : JSON.stringify(data.reply);
-            const parsed = JSON.parse(reply);
+            const parsed = JSON.parse(readCompletion(await response.json()).reply);
             return typeof parsed?.complete === "boolean" ? parsed : null;
         } catch (e) {
             console.error("Failed to parse completion check reply:", e);
@@ -559,7 +498,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     const TIP_DECISION_EVERY_STEPS = 4;
 
     /**
-     * Asks the backend's decision model (Jev, via the dispatcher role) whether one of the tips fits
+     * Asks the backend's decision model (Jev, via the decider role) whether one of the tips fits
      * the current situation. Runs when the site changes and every few steps after that; never throws,
      * and a failure just means no automatic tip.
      */
@@ -577,31 +516,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         lastDecisionHost = host;
         stepsSinceDecision = 0;
         try {
-            const response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    agentRole: "dispatcher",
-                    state: {
-                        task: userPrompt,
-                        current_url: currentUrl ?? "",
-                        recent_actions: past_actions.slice(-5).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
-                        agent_notepad: agentNotes.slice(-1500),
+            const answers = await askDecider({
+                task: userPrompt,
+                current_url: currentUrl ?? "",
+                recent_actions: past_actions.slice(-5).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
+                agent_notepad: agentNotes.slice(-1500),
+            }, {
+                tip: {
+                    ...tipQuestion,
+                    criteria: {
+                        ...tipQuestion.criteria,
+                        ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
                     },
-                    questions: {
-                        tip: {
-                            ...tipQuestion,
-                            criteria: {
-                                ...tipQuestion.criteria,
-                                ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
-                            },
-                        },
-                    },
-                }),
-                signal: AbortSignal.timeout(5000),
-            });
-            if (!response.ok) throw new Error(`dispatcher returned ${response.status}`);
-            const choice = (await response.json())?.answers?.tip?.choice;
+                },
+            }, AbortSignal.timeout(5000));
+            const choice = answers.tip?.choice;
             autoTipId = taskTips.some(t => t.id === choice) ? choice : null;
             console.log(`[Agent] tip decision: ${autoTipId ?? "none"}`);
         } catch (error) {
@@ -845,6 +774,72 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         return `now ${describeScrollPosition(after)}`;
     }
 
+    /** Page text fetched by read_page, sent with the next agent call only (cleared after it). */
+    let pageTextNextCall = "";
+    /** Words read_page returns when the agent doesn't ask for a specific amount. */
+    const READ_PAGE_DEFAULT_WORDS = 5000;
+
+    /** read_page tool: extracts the current page's text into the next agent call. Returns the result shown to the model. */
+    async function applyReadPage(maxWords: unknown, wholePage: boolean): Promise<string> {
+        const requested = toNumberIfFinite(maxWords);
+        if (maxWords !== undefined && maxWords !== null && maxWords !== "" && (requested === null || requested < 1)) {
+            return "failed: `max_words` must be a positive whole number (or left out for the default).";
+        }
+        const limit = requested !== null ? Math.floor(requested) : READ_PAGE_DEFAULT_WORDS;
+        const surface = await getAgentSurface();
+        if (surface?.kind !== "webview") return "failed: no web page is open to read.";
+        // Unless the whole page is asked for, read just the main content (a lone <article>, or
+        // <main>) so menus, sidebars, ads and the footer don't bury it. Several <article>s mean a
+        // feed or result list, where one of them isn't the content. A candidate that holds only a
+        // small part of the page's text (e.g. one card) is skipped in favour of the whole page.
+        const page = await runInMainFrame<{ title: string; text: string; mainOnly: boolean }>(surface.wc, `
+            (() => {
+                const title = document.title || "";
+                if (!document.body) return { title, text: "", mainOnly: false };
+                const full = document.body.innerText || "";
+                if (!${wholePage}) {
+                    const articles = document.querySelectorAll('article');
+                    const candidates = [...document.querySelectorAll('main, [role="main"]')];
+                    if (articles.length === 1) candidates.unshift(articles[0]);
+                    for (const el of candidates) {
+                        const text = el.innerText || "";
+                        if (text.trim().length >= 500 && text.length >= full.length * 0.2) return { title, text, mainOnly: true };
+                    }
+                }
+                return { title, text: full, mainOnly: false };
+            })()
+        `, 5000);
+        if (!page) return "failed: couldn't read the page's text (it may still be loading). Try again in a moment.";
+        const text = page.text
+            .replace(/[ \t ]+/g, " ")
+            .replace(/ *\n */g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+        if (!text) return "the page has no readable text (it may be an image, canvas or video).";
+
+        // Cut after the limit-th word, keeping the text's line breaks.
+        const wordPattern = /\S+/g;
+        let totalWords = 0;
+        let cutAt = text.length;
+        for (let m = wordPattern.exec(text); m; m = wordPattern.exec(text)) {
+            totalWords++;
+            if (totalWords === limit) cutAt = m.index + m[0].length;
+        }
+        const truncated = totalWords > limit;
+        const shownWords = truncated ? limit : totalWords;
+        const url = surface.wc.getURL();
+        const scope = page.mainOnly ? "main content only — menus, sidebars and footer left out; call read_page with whole_page: true if you need them" : "whole page";
+        const header = `\n\n=== PAGE TEXT (from read_page: ${page.title ? `"${page.title}" — ` : ""}${url}; ${scope}) ===\n`;
+        const footer = truncated
+            ? `\n=== END OF PAGE TEXT — cut short: showing only the first ${shownWords} of ${totalWords} words. For all of it, call read_page with max_words: ${totalWords}${wholePage ? " and whole_page: true" : ""}. ===`
+            : "\n=== END OF PAGE TEXT ===";
+        pageTextNextCall = `${header}${text.slice(0, cutAt)}${footer}`;
+        const what = page.mainOnly ? "main content" : "page";
+        return truncated
+            ? `got the first ${shownWords} of ${totalWords} words of the ${what} (cut short); the text is shown in the next step only — note what you need`
+            : `got the whole ${what} (${totalWords} words); the text is shown in the next step only — note what you need`;
+    }
+
     async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string, openTabs?: AgentTabInfo[], elements?: LabeledElement[], scrollPosition?: ScrollPosition, overallRequest?: string, screenNote?: string){
         throwIfStopped();
         const tabsContext = openTabs && openTabs.length > 0
@@ -864,27 +859,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
-            response = await fetch("https://indus-backend.tushar-vijayanagar.workers.dev/agent", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ 
-                    messages: [
-                        // The static prompt is cached by the backend (prompt caching); anything that
-                        // changes per step must come after it, or every step pays for the full prompt.
-                        { role: "system", content: agentPrompt, cache: true },
-                        ...(past_actions.length > 0
-                            ? [{ role: "system", content: "Previous actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n") }]
-                            : []),
-                        { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${stepDelayContext()}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}` }
-                    ],
-                    ...(imageurl ? { imageUrl: imageurl } : {}),
-                    // The backend's default tools are label-based; grid mode overrides them.
-                    ...(TARGETING_MODE === "grid" ? { tools: GRID_MODE_TOOLS } : {}),
-                }),
-                signal: pendingFetchAbortController.signal,
-            });
+            response = await postLlm("agent", {
+                messages: buildMessages([
+                    // The static prompt is cached (prompt caching); anything that changes per
+                    // step must come after it, or every step pays for the full prompt.
+                    { role: "system", content: agentPrompt, cache: true },
+                    ...(past_actions.length > 0
+                        ? [{ role: "system" as const, content: "Previous actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n") }]
+                        : []),
+                    { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${stepDelayContext()}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}${pageTextNextCall}` }
+                ], imageurl || undefined),
+                tools: TARGETING_MODE === "labels" ? LABEL_MODE_TOOLS : GRID_MODE_TOOLS,
+                // Every agent step must be a tool call. (JSON mode isn't used here: it made the model
+                // write even the user-facing final_answer text as JSON.)
+                tool_choice: "required",
+            }, pendingFetchAbortController.signal);
         } catch (error) {
             if (error instanceof Error && error.name === "AbortError") {
                 if (agentStopped) throw new AgentStoppedError();
@@ -902,7 +891,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             throw new Error(`Agent action endpoint returned ${response.status}: ${errText}`);
         }
         const data = await response.json();
-        return data;
+        const cachedTokens = data.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+        console.log(`[Agent] usage: prompt=${data.usage?.prompt_tokens ?? "?"} cached=${cachedTokens} completion=${data.usage?.completion_tokens ?? "?"}`);
+        return { ...readCompletion(data), usage: data.usage ?? null };
     }
 
     /** Reverse of gridLabel(): parse e.g. "a5" → 0-based grid index.
@@ -1679,6 +1670,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             cmd = { type: "agent:write_notes", text: String(tool_arguments.text ?? ""), mode, find: typeof tool_arguments.find === "string" ? tool_arguments.find : undefined };
         } else if (tool.name === "read_notes") {
             cmd = { type: "agent:read_notes" };
+        } else if (tool.name === "read_page") {
+            cmd = { type: "agent:read_page", maxWords: tool_arguments.max_words, wholePage: tool_arguments.whole_page === true || tool_arguments.whole_page === "true" };
         } else if (tool.name === "get_tips") {
             cmd = { type: "agent:get_tips", topic: String(tool_arguments.topic ?? "") };
         } else if (tool.name === "change_step_delay") {
@@ -1958,6 +1951,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
         setAgentNotes(resumeState.notes ?? "");
         showFullNotesNextCall = false;
+        pageTextNextCall = "";
 
         try {
             agentStopped = false;
@@ -2090,6 +2084,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         const scrollBefore = activeSurface?.kind === "webview" ? await getScrollPosition(activeSurface.wc) : undefined;
                         const response = await GetAction(promptToUse, screenshot, currentUrl, openTabs, TARGETING_MODE === "labels" ? elements : undefined, scrollBefore, promptToUse !== instruction ? instruction : undefined, screenNote);
                         showFullNotesNextCall = false;
+                        pageTextNextCall = "";
                         throwIfStopped();
                         if (!response) {
                             throw new Error("Agent action endpoint returned no response.");
@@ -2203,6 +2198,25 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 result: notesResult,
                             });
                             emit("agent:action", notesExplanation);
+                            continue;
+                        }
+
+                        if (cmd.type === "agent:read_page") {
+                            // Reading doesn't change the page, so like the notepad tools it skips the
+                            // browser action, the repetition check and the DOM wait.
+                            const readResult = await applyReadPage(cmd.maxWords, cmd.wholePage);
+                            console.log(`[Agent] read_page: ${readResult}`);
+                            const readExplanation = tool_arguments.explanation || "Read the page's text.";
+                            past_actions.push({
+                                tool: tool.name,
+                                parameters: {
+                                    ...(cmd.maxWords !== undefined ? { max_words: cmd.maxWords } : {}),
+                                    ...(cmd.wholePage ? { whole_page: true } : {}),
+                                },
+                                explanation: readExplanation,
+                                result: noteFailure ? `${readResult}; ${noteFailure}` : readResult,
+                            });
+                            emit("agent:action", readExplanation);
                             continue;
                         }
 

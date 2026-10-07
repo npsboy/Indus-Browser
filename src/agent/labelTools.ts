@@ -1,23 +1,22 @@
 /**
- * Tool schemas for the legacy grid-coordinate targeting mode: elements are
- * picked by the grid coordinates drawn over the screenshot.
+ * Tool schemas for label targeting mode: elements are picked by the number label
+ * drawn on them in the screenshot (one per interactive element).
  */
-export const GRID_MODE_TOOLS = [
+export const LABEL_MODE_TOOLS = [
     {
         type: "function",
         function: {
             name: "click",
-            description: "Click on a specific element in the UI.",
+            description: "Click an interactive element, identified by the number label drawn on it in the screenshot.",
             parameters: {
                 type: "object",
                 properties: {
-                    x: { type: "string", description: "The column no of the element to click." },
-                    y: { type: "string", description: "The row no of the element to click." },
-                    click_count: { type: "string", description: "The number of times to click. Can be 1 for a single click, 2 for a double click, etc." },
+                    label: { type: "string", description: "The number label of the element to click, e.g. \"12\"." },
+                    click_count: { type: "integer", description: "1 for a single click, 2 for a double click. Defaults to 1." },
                     explanation: { type: "string", description: "one tiny sentence describing what you just clicked." },
                     note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
                 },
-                required: ["x", "y"]
+                required: ["label"]
             }
         }
     },
@@ -25,7 +24,7 @@ export const GRID_MODE_TOOLS = [
         type: "function",
         function: {
             name: "type",
-            description: "Input text into a specific field in the UI.",
+            description: "Input text into the currently focused field. Click the field first if it is not focused.",
             parameters: {
                 type: "object",
                 properties: {
@@ -75,18 +74,17 @@ export const GRID_MODE_TOOLS = [
         type: "function",
         function: {
             name: "scroll",
-            description: "Scroll to a specific part of the page.",
+            description: "Scroll the page, or a scrollable element on it.",
             parameters: {
                 type: "object",
                 properties: {
-                    x: { type: "string", description: "The column no to anchor the scrolling to." },
-                    y: { type: "string", description: "The row no to anchor the scrolling to." },
-                    delta_x: { type: "string", description: "The no of columns to scroll by. Can be positive or negative. Horizontal scrolling is not used much." },
-                    delta_y: { type: "string", description: "The no of rows to scroll by. Can be positive or negative." },
+                    direction: { type: "string", enum: ["up", "down", "left", "right"], description: "Which way to scroll." },
+                    amount: { type: "number", description: "How far to scroll, as a fraction of the screen. 0.5 = half a screen, 1 = a full screen. Defaults to 0.75." },
+                    label: { type: "string", description: "Optional. Label of an element inside the scrollable area you want to scroll (e.g. a sidebar or list). Omit to scroll the main page." },
                     explanation: { type: "string", description: "one tiny sentence describing why you are scrolling there." },
                     note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
                 },
-                required: ["x", "y", "delta_y"]
+                required: ["direction"]
             }
         }
     },
@@ -110,7 +108,7 @@ export const GRID_MODE_TOOLS = [
         type: "function",
         function: {
             name: "warn",
-            description: "detect if the very next step is a sensitive action like login, payments, posting in public and so on and warn the user. Only warn at the last moment possible and only if you absolutely cannot proceed even a step further.",
+            description:"detect if the very next step is a sensitive action like login, payments, posting in public and so on and warn the user. Only warn at the last moment possible and only if you absolutely cannot proceed even a step further.",
             parameters: {
                 type: "object",
                 properties: {
@@ -129,7 +127,7 @@ export const GRID_MODE_TOOLS = [
                 type: "object",
                 properties: {
                     text: { type: "string", description: "The text to save. With mode \"edit\": the new text that takes the place of `find` (an empty string deletes it)." },
-                    mode: { type: "string", enum: ["append", "replace", "edit"], description: "\"append\" adds to the end of your notes (default). \"edit\" overwrites one part: the exact text given in `find` is replaced by `text` — use it to update a fact, tick off a plan step or delete an outdated line without rewriting everything. To tick off a task or mark it completed, always edit its existing line (\"[ ] 2. …\" → \"[x] 2. …\") instead of appending a new note. \"replace\" overwrites all of your notes, e.g. to tidy up." },
+                    mode: { type: "string", enum: ["append", "replace", "edit"], description: "\"append\" adds to the end of your notes (default). \"edit\" overwrites one part: the exact text given in `find` is replaced by `text` — use it to update a fact, tick off a plan step or delete an outdated line without rewriting everything. \"replace\" overwrites all of your notes, e.g. to tidy up." },
                     find: { type: "string", description: "Only for mode \"edit\": the exact text in your notepad to overwrite, copied character for character. Include enough of it to be unique (e.g. a whole line)." },
                     explanation: { type: "string", description: "one tiny sentence describing what you are noting down." },
                 },

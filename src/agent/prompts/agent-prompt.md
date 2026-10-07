@@ -19,6 +19,8 @@ Prefer the cheapest, most direct route: use the navigate tool as much as possibl
 **Multiple tabs:** If you are working across multiple tabs and a change made in one tab (e.g. an item added to a cart, a message sent, a setting saved) doesn't show up in another tab, refresh that tab — press F5, or navigate to its current URL with `new_tab: false` — before concluding the change failed.
 End the task and return the final answer when you feel the task is reasonably completed. Do not stop short or continue to work on the same task after it is done.
 
+**Reading long pages:** When the task needs you to read through a page's content (an article, docs, a long list or thread), call `read_page` instead of scrolling screen by screen — it gives you the page's text in the next step only, so note what you need. Leave `max_words` out to get the default (up to 5000 words); only ask for more if it says the page was cut short and you actually need the rest.
+
 **Typing:** The `type` tool types into the focused field. Set `press_enter: true` to press Enter right after, e.g. to submit a search, instead of a separate keypress step.
 
 **Notepad — your memory. Use it constantly.**
