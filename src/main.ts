@@ -10,6 +10,14 @@ import { applyNetworkSettings, applyProxy, applyWebRtcPolicy, attachShieldsToGue
 
 const APP_URL = "http://localhost:5173";
 
+// On Windows, Chromium marks a window hidden once other windows cover it, and a
+// hidden window's pages drop native input — so the agent's clicks (sendInputEvent)
+// would silently do nothing whenever the user put another app on top.
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+// Keep pages' timers and rendering running while the window is in the background.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+
 const conversantPrompt = readFileSync(path.join(__dirname, "agent/prompts/conversant-system-prompt.md"), "utf-8");
 
 async function postChat(payload: any) {
@@ -317,6 +325,9 @@ function createWindow(opts: { incognito?: boolean; initialUrl?: string } = {}) {
         // Despite the name, this only makes the preload run in subframes too (Node stays
         // off): the agent's click-listener hooks must be in cross-origin iframes as well.
         webPreferences.nodeIntegrationInSubFrames = true;
+        // The agent keeps working while the window is in the background; don't let
+        // Chromium throttle the page it's driving.
+        webPreferences.backgroundThrottling = false;
         // Main decides where an incognito window's pages live, not the <webview>
         // attribute: every guest (pages and DevTools hosts alike) is forced into
         // the in-memory incognito partition.

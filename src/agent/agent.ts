@@ -997,10 +997,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         const info = await getAgentSurfaceInfo();
         if (!info || info.mode === "internal") return null;
 
+        // A minimized or hidden window drops native input just like a background tab does.
+        const win = getMainWindow();
+        const windowShown = !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized();
+
         if (info.mode === "renderer") {
-            const win = getMainWindow();
             if (!win) return null;
-            return { wc: win.webContents, x: info.x, y: info.y, w: info.w, h: info.h, kind: "renderer", foreground: true };
+            return { wc: win.webContents, x: info.x, y: info.y, w: info.w, h: info.h, kind: "renderer", foreground: windowShown };
         }
 
         if (!info.wcId) {
@@ -1013,7 +1016,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             console.error("Could not find the agent's webview WebContents");
             return null;
         }
-        return { wc: guestWc, x: info.x, y: info.y, w: info.w, h: info.h, kind: "webview", foreground: info.visible };
+        return { wc: guestWc, x: info.x, y: info.y, w: info.w, h: info.h, kind: "webview", foreground: info.visible && windowShown };
     }
 
     type ScreenshotResult = {
