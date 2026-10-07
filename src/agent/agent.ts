@@ -57,6 +57,9 @@ const repetitionQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/
 const tipQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/tip-question.json"), "utf-8"));
 /** Below this, a "progressing" verdict from Jev still goes to the supervisor. */
 const REPETITION_CHECK_MIN_CONFIDENCE = 0.7;
+const simpleTaskQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/simple-task-question.json"), "utf-8"));
+/** How sure the decider must be that a task is simple before the planner is skipped. */
+const SKIP_PLANNER_MIN_CONFIDENCE = 0.8;
 
 export type AgentTaskPlan = {
     complexity: string;
@@ -395,7 +398,33 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         }
     }
 
+    /**
+     * First gate: asks the decision model (Jev, via the decider role) whether the task is simple
+     * enough to skip the planner. Only a confident "simple" skips it; anything else (complex,
+     * low confidence, an error) goes through the planner, which can still call it simple.
+     */
+    async function jevSeesSimpleTask(userPrompt: string): Promise<boolean> {
+        throwIfStopped();
+        try {
+            const answers = await askDecider({
+                task: userPrompt,
+                agent_notepad: agentNotes.slice(-1500),
+            }, { simple: simpleTaskQuestion }, AbortSignal.timeout(5000));
+            const answer = answers.simple;
+            console.log(`[Agent] simple-task check: ${answer?.choice} (confidence ${answer?.confidence})`);
+            return answer?.choice === "simple" && typeof answer.confidence === "number" && answer.confidence >= SKIP_PLANNER_MIN_CONFIDENCE;
+        } catch (error) {
+            console.warn("[Agent] simple-task check failed, using the planner:", error);
+            return false;
+        }
+    }
+
     async function buildTaskPlan(instruction: string): Promise<AgentTaskPlan> {
+        if (await jevSeesSimpleTask(instruction)) {
+            console.log("Decider is confident the task is simple; skipping the planner.");
+            return { complexity: "simple", tasks: [instruction] };
+        }
+
         // Let the planner see what the agent's tab shows right now; planning still works without it.
         let screenshot: string | undefined;
         try {

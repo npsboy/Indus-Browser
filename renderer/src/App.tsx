@@ -1426,6 +1426,46 @@ function App() {
     }
   }
 
+  /**
+   * The conversation as the chat model should see it. Built from everything in the session, so
+   * what the agent did (its steps, answer or warning) is known after switching back to chat.
+   */
+  function buildChatPayloadHistory(messages: ChatMessage[], latest: string): { role: 'user' | 'assistant'; content: string }[] {
+    const clip = (text: string, max: number) => {
+      const flat = text.replace(/\s+/g, ' ').trim();
+      return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+    };
+    const out: { role: 'user' | 'assistant'; content: string }[] = [];
+    const push = (role: 'user' | 'assistant', content: string) => {
+      const last = out[out.length - 1];
+      if (last && last.role === role) last.content += `\n${content}`;
+      else out.push({ role, content });
+    };
+    let steps: string[] = [];
+    let agentRan = false;
+    const flushSteps = () => {
+      if (steps.length === 0) return;
+      const shown = steps.slice(-8).map(s => clip(s, 160));
+      const label = steps.length > shown.length ? `last ${shown.length} of ${steps.length} steps` : 'steps';
+      push('assistant', `[Browser agent actions taken (${label}): ${shown.join(' → ')}]`);
+      steps = [];
+    };
+    for (const m of messages) {
+      if (m.role === 'agent') { steps.push(m.text); agentRan = true; continue; }
+      if (m.role === 'user') { flushSteps(); agentRan = false; push('user', m.text); continue; }
+      if (m.role === 'reply') {
+        flushSteps();
+        push('assistant', agentRan ? `[Browser agent finished and answered]: ${m.text}` : m.text);
+        agentRan = false;
+        continue;
+      }
+      if (m.role === 'warning' && agentRan) { flushSteps(); push('assistant', `[Browser agent stopped with a warning]: ${clip(m.text, 600)}`); }
+    }
+    flushSteps();
+    push('user', latest);
+    return out;
+  }
+
   async function requestChatReply(history: { role: 'user' | 'assistant'; content: string }[], imageUrl?: string) {
     setIsChatLoading(true);
     try {
@@ -1579,24 +1619,18 @@ function App() {
       }
       // Agent runs add to this conversation too, so chat replies are built from all of it
       // (chatHistory only has the chat turns).
-      const history = [
-        ...chatMessages
-          .filter(m => m.role === 'user' || m.role === 'reply')
-          .map(m => ({ role: m.role === 'user' ? 'user' as const : 'assistant' as const, content: m.text })),
-        { role: 'user' as const, content: text },
-      ];
       setChatHistory(prev => [...prev, { role: 'user', content: text }]);
-      await requestChatReply(history, attachedImage?.dataUrl);
+      await requestChatReply(buildChatPayloadHistory(chatMessages, text), attachedImage?.dataUrl);
       return;
     }
 
     // Chat mode
     const notice = routeSwitchNotice('chat', chatMessages);
     if (notice.length) setChatMessages(prev => [...prev, ...notice]);
-    const updatedHistory = [...chatHistory, { role: 'user' as const, content: text }];
-    setChatHistory(updatedHistory);
+    setChatHistory([...chatHistory, { role: 'user' as const, content: text }]);
 
-    await requestChatReply(updatedHistory, attachedImage?.dataUrl);
+    // Built from the whole conversation, so anything the agent did earlier is part of it.
+    await requestChatReply(buildChatPayloadHistory(chatMessages, text), attachedImage?.dataUrl);
     taskSuggestion.suggest(text);
   }
 
