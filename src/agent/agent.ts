@@ -17,7 +17,7 @@ import {
 import { pressKeyInBackground, scrollInBackground, typeInBackground } from "./backgroundInput";
 import { GRID_MODE_TOOLS } from "./gridTools";
 import { LABEL_MODE_TOOLS } from "./labelTools";
-import { askDecider, buildMessages, jsonModePayload, postLlm, readCompletion } from "./llm";
+import { askDecider, buildMessages, jsonModePayload, parseJsonReply, postLlm, readCompletion } from "./llm";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -60,6 +60,35 @@ const REPETITION_CHECK_MIN_CONFIDENCE = 0.7;
 const simpleTaskQuestion = JSON.parse(readFileSync(join(__dirname, "prompts/jev/simple-task-question.json"), "utf-8"));
 /** How sure the decider must be that a task is simple before the planner is skipped. */
 const SKIP_PLANNER_MIN_CONFIDENCE = 0.8;
+/** Yes/no questions on whether an optional block of context is needed, keyed by context id. */
+const contextQuestions: Record<string, unknown> = JSON.parse(readFileSync(join(__dirname, "prompts/jev/context-questions.json"), "utf-8"));
+/** An optional block is attached once the decider gives at least this probability that it's needed. */
+const CONTEXT_MIN_PROBABILITY = 0.5;
+
+/**
+ * Optional blocks of an agent call. Each is sent only when the decider thinks it's needed (or
+ * couldn't be asked), or when the agent asked for it with get_context; otherwise the agent is
+ * told it was left out.
+ */
+type ContextId = "conversation" | "open_tabs" | "scroll_position" | "step_delay" | "older_actions";
+/** What the agent is told about each block when it is left out. */
+const CONTEXT_DESCRIPTIONS: Record<ContextId, string> = {
+    conversation: "the overall request this step is part of, including the conversation so far",
+    open_tabs: "the list of open tabs (titles and URLs)",
+    scroll_position: "where the page is scrolled and how long it is",
+    step_delay: "the wait the planner set before each of your steps, and why",
+    older_actions: "your older past actions in this task (only the last few are shown)",
+};
+const CONTEXT_IDS = Object.keys(CONTEXT_DESCRIPTIONS) as ContextId[];
+/** Past actions always sent with an agent call; older ones (up to MAX_PAST_ACTIONS_SHOWN) are optional. */
+const RECENT_ACTIONS_ALWAYS_SHOWN = 5;
+const MAX_PAST_ACTIONS_SHOWN = 20;
+
+/** True when the decider's yes/no answer for `key` is missing or at least CONTEXT_MIN_PROBABILITY. */
+function deciderSaysNeeded(answers: any, key: string): boolean {
+    const p = answers?.[key]?.noul;
+    return typeof p !== "number" || p >= CONTEXT_MIN_PROBABILITY;
+}
 
 export type AgentTaskPlan = {
     complexity: string;
@@ -194,7 +223,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     type PlannerReply = { complexity: string; tasks?: string[]; notes_edits?: unknown; step_delay_seconds?: unknown; step_delay_reason?: unknown };
 
-    async function planTask(userPrompt: string, screenshot?: string): Promise<PlannerReply | null> {
+    /**
+     * `includeNotes`: whether to send the notepad (the decider may judge it unneeded).
+     * `leftOut`: context deliberately not sent, named so the planner doesn't assume it saw it.
+     */
+    async function planTask(userPrompt: string, screenshot: string | undefined, includeNotes: boolean, leftOut: string[]): Promise<PlannerReply | null> {
         throwIfStopped();
         pendingFetchAbortController = new AbortController();
         let response: Response;
@@ -205,8 +238,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                     role: "user",
                     // On a follow-up, the notepad says what's already done (including the
                     // previous plan's checklist), so the new plan covers only what's left.
-                    content: `This is the user's request. "${userPrompt}"` + (agentNotes
+                    content: `This is the user's request. "${userPrompt}"` + (includeNotes && agentNotes
                         ? `\n\nThe agent's notepad from earlier in this conversation (what was already done and found):\n${agentNotes}`
+                        : "") + (leftOut.length > 0
+                        ? `\n\n(Not attached, judged unnecessary for planning: ${leftOut.join("; ")}.)`
                         : ""),
                 }
             ], screenshot), pendingFetchAbortController.signal);
@@ -226,7 +261,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
         try {
-            return JSON.parse(readCompletion(await response.json()).reply) as PlannerReply;
+            return parseJsonReply(readCompletion(await response.json()).reply) as PlannerReply;
         } catch (e) {
             console.error("Failed to parse planner reply:", e);
             return null;
@@ -297,7 +332,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         }
 
         try {
-            return JSON.parse(readCompletion(await response.json()).reply) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
+            return parseJsonReply(readCompletion(await response.json()).reply) as { abnormal_repetition: boolean; refined_prompt?: string; notes_edits?: unknown };
         } catch (e) {
             console.error("Failed to parse supervisor reply:", e);
             return null;
@@ -344,7 +379,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
         try {
-            const parsed = JSON.parse(readCompletion(await response.json()).reply);
+            const parsed = parseJsonReply(readCompletion(await response.json()).reply);
             return typeof parsed?.progressing === "boolean" ? parsed : null;
         } catch (e) {
             console.error("Failed to parse progress check reply:", e);
@@ -390,7 +425,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             return null;
         }
         try {
-            const parsed = JSON.parse(readCompletion(await response.json()).reply);
+            const parsed = parseJsonReply(readCompletion(await response.json()).reply);
             return typeof parsed?.complete === "boolean" ? parsed : null;
         } catch (e) {
             console.error("Failed to parse completion check reply:", e);
@@ -399,41 +434,59 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     }
 
     /**
-     * First gate: asks the decision model (Jev, via the decider role) whether the task is simple
-     * enough to skip the planner. Only a confident "simple" skips it; anything else (complex,
-     * low confidence, an error) goes through the planner, which can still call it simple.
+     * First gate, in one decider request (Jev, via the decider role): is the task simple enough
+     * to skip the planner, and if not, does the planner need the notepad and a screenshot?
+     * Only a confident "simple" skips the planner; anything else (complex, low confidence, an
+     * error) goes through it, which can still call it simple. A missing or failed answer counts
+     * as the context being needed.
      */
-    async function jevSeesSimpleTask(userPrompt: string): Promise<boolean> {
+    async function askPlanningDecider(userPrompt: string): Promise<{ simple: boolean; needsNotepad: boolean; needsScreenshot: boolean }> {
         throwIfStopped();
         try {
             const answers = await askDecider({
                 task: userPrompt,
                 agent_notepad: agentNotes.slice(-1500),
-            }, { simple: simpleTaskQuestion }, AbortSignal.timeout(5000));
+            }, {
+                simple: simpleTaskQuestion,
+                ...(agentNotes ? { planner_notepad: contextQuestions.planner_notepad } : {}),
+                planner_screenshot: contextQuestions.planner_screenshot,
+            }, AbortSignal.timeout(5000));
             const answer = answers.simple;
-            console.log(`[Agent] simple-task check: ${answer?.choice} (confidence ${answer?.confidence})`);
-            return answer?.choice === "simple" && typeof answer.confidence === "number" && answer.confidence >= SKIP_PLANNER_MIN_CONFIDENCE;
+            const decision = {
+                simple: answer?.choice === "simple" && typeof answer.confidence === "number" && answer.confidence >= SKIP_PLANNER_MIN_CONFIDENCE,
+                needsNotepad: deciderSaysNeeded(answers, "planner_notepad"),
+                needsScreenshot: deciderSaysNeeded(answers, "planner_screenshot"),
+            };
+            console.log(`[Agent] simple-task check: ${answer?.choice} (confidence ${answer?.confidence}); planner notepad p=${answers.planner_notepad?.noul ?? "-"}, screenshot p=${answers.planner_screenshot?.noul ?? "-"}`);
+            return decision;
         } catch (error) {
-            console.warn("[Agent] simple-task check failed, using the planner:", error);
-            return false;
+            console.warn("[Agent] simple-task check failed, using the planner with full context:", error);
+            return { simple: false, needsNotepad: true, needsScreenshot: true };
         }
     }
 
     async function buildTaskPlan(instruction: string): Promise<AgentTaskPlan> {
-        if (await jevSeesSimpleTask(instruction)) {
+        const decision = await askPlanningDecider(instruction);
+        if (decision.simple) {
             console.log("Decider is confident the task is simple; skipping the planner.");
             return { complexity: "simple", tasks: [instruction] };
         }
 
-        // Let the planner see what the agent's tab shows right now; planning still works without it.
+        const leftOut: string[] = [];
+        if (agentNotes && !decision.needsNotepad) leftOut.push("the agent's notepad from earlier in this conversation");
+        // Let the planner see what the agent's tab shows right now, if it needs to; planning still works without it.
         let screenshot: string | undefined;
-        try {
-            screenshot = (await takeScreenshot())?.base64 || undefined;
-        } catch (e) {
-            if (e instanceof AgentStoppedError || e instanceof AgentPausedError) throw e;
-            console.warn("Planner screenshot failed; planning without it:", e);
+        if (decision.needsScreenshot) {
+            try {
+                screenshot = (await takeScreenshot())?.base64 || undefined;
+            } catch (e) {
+                if (e instanceof AgentStoppedError || e instanceof AgentPausedError) throw e;
+                console.warn("Planner screenshot failed; planning without it:", e);
+            }
+        } else {
+            leftOut.push("a screenshot of the agent's current tab");
         }
-        const plannerResult = await planTask(instruction, screenshot);
+        const plannerResult = await planTask(instruction, screenshot, decision.needsNotepad, leftOut);
         if (!plannerResult) {
             throw new Error("Planner failed to generate a plan.");
         }
@@ -526,46 +579,104 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     /** How often the decision model is asked again on the same site (it is always asked again when the site changes). */
     const TIP_DECISION_EVERY_STEPS = 4;
 
+    /** Optional context the agent asked for with get_context; it stays on for the rest of the session. */
+    const pinnedContext = new Set<ContextId>();
+    /** Optional context the decider judged needed at its last decision; null (not asked yet, or it failed) means send it all. */
+    let deciderContext: Set<ContextId> | null = null;
+    /** Which optional blocks were present at the last decision, so a new one (e.g. a second tab) gets decided right away. */
+    let decidedContextIds = "";
+
     /**
-     * Asks the backend's decision model (Jev, via the decider role) whether one of the tips fits
-     * the current situation. Runs when the site changes and every few steps after that; never throws,
-     * and a failure just means no automatic tip.
+     * Asks the backend's decision model (Jev, via the decider role), in one request, whether one
+     * of the tips fits the current situation and which optional context blocks the agent needs.
+     * Runs when the site changes, every few steps after that, and when the set of optional blocks
+     * changes; never throws. A failure means no automatic tip and all optional context.
      */
-    async function decideAutoTip(userPrompt: string, currentUrl?: string): Promise<void> {
-        if (taskTips.length === 0) return;
+    async function decideStepContext(userPrompt: string, currentUrl: string | undefined, optional: Partial<Record<ContextId, string>>): Promise<void> {
         let host: string | undefined;
         try { host = currentUrl ? new URL(currentUrl).hostname : undefined; } catch { /* not a URL */ }
         stepsSinceDecision++;
         const sameSite = host === lastDecisionHost;
-        if (sameSite && stepsSinceDecision < TIP_DECISION_EVERY_STEPS) return;
+        const presentIds = CONTEXT_IDS.filter(id => optional[id] !== undefined);
+        const contextChanged = presentIds.join(",") !== decidedContextIds;
+        if (sameSite && stepsSinceDecision < TIP_DECISION_EVERY_STEPS && !contextChanged) return;
         // A tip picked on this site stays until the site changes: re-asking mid-task (e.g. mid-game)
         // can drop it just when it's needed. New site → start fresh.
-        if (sameSite && autoTipId) return;
         if (!sameSite) autoTipId = null;
+        const askTip = taskTips.length > 0 && !autoTipId;
+        // Context the agent asked for is always sent, so there's nothing to decide about it.
+        const contextIds = presentIds.filter(id => !pinnedContext.has(id));
         lastDecisionHost = host;
         stepsSinceDecision = 0;
+        decidedContextIds = presentIds.join(",");
+        if (!askTip && contextIds.length === 0) return;
+
+        const questions: Record<string, unknown> = Object.fromEntries(contextIds.map(id => [`ctx_${id}`, contextQuestions[id]]));
+        if (askTip) {
+            questions.tip = {
+                ...tipQuestion,
+                criteria: {
+                    ...tipQuestion.criteria,
+                    ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
+                },
+            };
+        }
         try {
             const answers = await askDecider({
                 task: userPrompt,
                 current_url: currentUrl ?? "",
                 recent_actions: past_actions.slice(-5).map(a => `${a.tool}: ${a.explanation ?? ""}${a.result ? ` (${a.result})` : ""}`),
                 agent_notepad: agentNotes.slice(-1500),
-            }, {
-                tip: {
-                    ...tipQuestion,
-                    criteria: {
-                        ...tipQuestion.criteria,
-                        ...Object.fromEntries(taskTips.map(t => [t.id, t.description])),
-                    },
-                },
-            }, AbortSignal.timeout(5000));
-            const choice = answers.tip?.choice;
-            autoTipId = taskTips.some(t => t.id === choice) ? choice : null;
-            console.log(`[Agent] tip decision: ${autoTipId ?? "none"}`);
+                ...(contextIds.length > 0
+                    ? { available_context: Object.fromEntries(contextIds.map(id => [id, optional[id]!.trim().slice(0, 400)])) }
+                    : {}),
+            }, questions, AbortSignal.timeout(5000));
+            if (askTip) {
+                const choice = answers.tip?.choice;
+                autoTipId = taskTips.some(t => t.id === choice) ? choice : null;
+                console.log(`[Agent] tip decision: ${autoTipId ?? "none"}`);
+            }
+            deciderContext = new Set(contextIds.filter(id => deciderSaysNeeded(answers, `ctx_${id}`)));
+            if (contextIds.length > 0) {
+                console.log(`[Agent] context decision: ${contextIds.map(id => `${id}=${answers[`ctx_${id}`]?.noul ?? "?"}`).join(", ")}`);
+            }
         } catch (error) {
-            console.warn("[Agent] tip decision failed:", error);
-            autoTipId = null;
+            console.warn("[Agent] tip/context decision failed:", error);
+            if (askTip) autoTipId = null;
+            deciderContext = null;
         }
+    }
+
+    /** Tells the agent which optional context was left out and how to get it. */
+    function withheldContextNote(withheld: ContextId[]): string {
+        if (withheld.length === 0) return "";
+        return `\n\nLeft out to keep this message short (a helper judged it not needed right now). If you need one, call get_context with its id and it will be included in every later step:\n${withheld.map(id => `- ${id}: ${CONTEXT_DESCRIPTIONS[id]}`).join("\n")}`;
+    }
+
+    /** get_context tool: turn on an optional context block by id for the rest of the session. Returns the result shown to the model. */
+    function applyGetContext(item: string): string {
+        const id = CONTEXT_IDS.find(c => c === item.trim().toLowerCase());
+        if (!id) return `no context "${item}". Available: ${CONTEXT_IDS.join(", ")}`;
+        pinnedContext.add(id);
+        return `${id} is included in every later step (whenever there is any)`;
+    }
+
+    /** The agent's tab as of the last check; when it changes, the agent has more than one tab in play. */
+    let lastOwnTabId: string | undefined;
+
+    /**
+     * Notes which tab the agent is in. Once it has moved to another tab (e.g. a click opened
+     * a new one, which the UI makes the agent's tab), the list of open tabs is attached to
+     * every later step so it can find its way back. Returns the new tab if it just moved.
+     */
+    function trackOwnTab(openTabs: AgentTabInfo[]): AgentTabInfo | undefined {
+        const own = openTabs.find(t => t.isAgentTab);
+        if (!own) return undefined;
+        const moved = lastOwnTabId !== undefined && own.id !== lastOwnTabId;
+        lastOwnTabId = own.id;
+        if (!moved) return undefined;
+        pinnedContext.add("open_tabs");
+        return own;
     }
 
     /**
@@ -871,20 +982,42 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     async function GetAction(userPrompt:string, imageurl:string, currentUrl?: string, openTabs?: AgentTabInfo[], elements?: LabeledElement[], scrollPosition?: ScrollPosition, overallRequest?: string, screenNote?: string){
         throwIfStopped();
-        const tabsContext = openTabs && openTabs.length > 0
-            ? `\nOpen tabs:\n${openTabs.map((t, i) => `  ${t.isAgentTab ? '[your tab] ' : ''}Tab ${i + 1}: ${t.title || 'Untitled'} — ${t.url}`).join('\n')}`
-            : "";
+        const formatActions = (from: number, to: number) => past_actions.slice(from, to).map((a, i) => `${from + i + 1}. ${JSON.stringify(a)}`).join("\n");
+        const firstShownAction = Math.max(0, past_actions.length - MAX_PAST_ACTIONS_SHOWN);
+        const firstRecentAction = Math.max(0, past_actions.length - RECENT_ACTIONS_ALWAYS_SHOWN);
+        // Optional blocks: sent only if the decider thinks they're needed or the agent asked for them.
+        const optional: Partial<Record<ContextId, string>> = {};
         // A sub-task (or a supervisor's refined prompt) on its own loses the conversation it came from.
-        const overallContext = overallRequest
-            ? `\n\nOverall request this is part of (including the conversation so far):\n${overallRequest}\n`
-            : "";
-        const scrollContext = scrollPosition ? `\nScroll position: ${describeScrollPosition(scrollPosition)}` : "";
+        if (overallRequest) optional.conversation = `\n\nOverall request this is part of (including the conversation so far):\n${overallRequest}\n`;
+        if (openTabs && openTabs.length > 0) {
+            optional.open_tabs = `\nOpen tabs:\n${openTabs.map((t, i) => `  ${t.isAgentTab ? '[your tab] ' : ''}Tab ${i + 1}: ${t.title || 'Untitled'} — ${t.url}`).join('\n')}`;
+        }
+        if (scrollPosition) optional.scroll_position = `\nScroll position: ${describeScrollPosition(scrollPosition)}`;
+        const stepDelay = stepDelayContext();
+        if (stepDelay) optional.step_delay = stepDelay;
+        if (firstRecentAction > firstShownAction) optional.older_actions = formatActions(firstShownAction, firstRecentAction);
+
         const screenContext = screenNote ? `\nNote: ${screenNote}` : "";
         const elementsContext = elements
             ? `\nInteractive elements on screen (label, element):\n${formatElementList(elements)}`
             : "";
-        await decideAutoTip(userPrompt, currentUrl);
+        await decideStepContext(userPrompt, currentUrl, optional);
         throwIfStopped();
+        const sends = (id: ContextId) => optional[id] !== undefined && (pinnedContext.has(id) || !deciderContext || deciderContext.has(id));
+        const block = (id: ContextId) => sends(id) ? optional[id]! : "";
+        const withheld = CONTEXT_IDS.filter(id => optional[id] !== undefined && !sends(id));
+        const actionsText = [block("older_actions"), formatActions(firstRecentAction, past_actions.length)].filter(Boolean).join("\n");
+        const contextName = (id: ContextId) => id.replace(/_/g, " ");
+        const attached = [
+            imageurl && "screenshot",
+            elements && "elements",
+            past_actions.length > 0 && "past actions",
+            agentNotes && "notepad",
+            pageTextNextCall && "page text",
+            ...new Set([...requestedTips, ...(autoTipId ? [autoTipId] : [])].map(id => `${id} tip`)),
+            ...CONTEXT_IDS.filter(sends).map(contextName),
+        ].filter(Boolean);
+        console.log(`context added: ${attached.join(", ") || "none"}${withheld.length > 0 ? ` context withheld: ${withheld.map(contextName).join(", ")}` : ""}`);
         pendingFetchAbortController = new AbortController();
         let response: Response;
         try {
@@ -894,9 +1027,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                     // step must come after it, or every step pays for the full prompt.
                     { role: "system", content: agentPrompt, cache: true },
                     ...(past_actions.length > 0
-                        ? [{ role: "system" as const, content: "Previous actions taken so far:\n" + past_actions.slice(-20).map((a, i) => `${i + 1}. ${JSON.stringify(a)}`).join("\n") }]
+                        ? [{ role: "system" as const, content: "Previous actions taken so far:\n" + actionsText }]
                         : []),
-                    { role: "user", content: `User task: "${userPrompt}"${overallContext}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${scrollContext}${stepDelayContext()}${tabsContext}${elementsContext}${notesContext()}${tipsContext()}${pageTextNextCall}` }
+                    { role: "user", content: `User task: "${userPrompt}"${block("conversation")}${currentUrl ? `\nCurrent URL: ${currentUrl}` : ""}${screenContext}${block("scroll_position")}${block("step_delay")}${block("open_tabs")}${elementsContext}${notesContext()}${tipsContext()}${pageTextNextCall}${withheldContextNote(withheld)}` }
                 ], imageurl || undefined),
                 tools: TARGETING_MODE === "labels" ? LABEL_MODE_TOOLS : GRID_MODE_TOOLS,
                 // Every agent step must be a tool call. (JSON mode isn't used here: it made the model
@@ -1703,6 +1836,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             cmd = { type: "agent:read_page", maxWords: tool_arguments.max_words, wholePage: tool_arguments.whole_page === true || tool_arguments.whole_page === "true" };
         } else if (tool.name === "get_tips") {
             cmd = { type: "agent:get_tips", topic: String(tool_arguments.topic ?? "") };
+        } else if (tool.name === "get_context") {
+            cmd = { type: "agent:get_context", item: String(tool_arguments.item ?? "") };
         } else if (tool.name === "change_step_delay") {
             cmd = { type: "agent:change_step_delay", seconds: tool_arguments.seconds, reason: typeof tool_arguments.reason === "string" ? tool_arguments.reason.trim() : "" };
         }
@@ -1972,6 +2107,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         autoTipId = null;
         lastDecisionHost = undefined;
         stepsSinceDecision = Infinity;
+        // Context decisions are per run too; context the agent asked for (pinnedContext) stays for the session.
+        deciderContext = null;
+        decidedContextIds = "";
+        lastOwnTabId = undefined;
         throwIfStopped();
         let finalAnswer = "";
         let currentTaskIndex = 0;
@@ -2086,7 +2225,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
                         let promptToUse = overridePrompt || currentTask;
 
-                        console.log("Running agent with instruction:", promptToUse);
                         throwIfStopped();
 
                         let screenshotResult = await takeScreenshot();
@@ -2110,6 +2248,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                             ? activeSurface.wc.getURL()
                             : undefined;
                         const openTabs = await tabs.listTabs().catch(() => [] as AgentTabInfo[]);
+                        trackOwnTab(openTabs);
                         const scrollBefore = activeSurface?.kind === "webview" ? await getScrollPosition(activeSurface.wc) : undefined;
                         const response = await GetAction(promptToUse, screenshot, currentUrl, openTabs, TARGETING_MODE === "labels" ? elements : undefined, scrollBefore, promptToUse !== instruction ? instruction : undefined, screenNote);
                         showFullNotesNextCall = false;
@@ -2258,6 +2397,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                             continue;
                         }
 
+                        if (cmd.type === "agent:get_context") {
+                            const contextResult = applyGetContext(cmd.item);
+                            console.log(`[Agent] get_context: ${contextResult}`);
+                            const contextExplanation = tool_arguments.explanation || "Asked for more context.";
+                            past_actions.push({ tool: tool.name, parameters: { item: cmd.item }, explanation: contextExplanation, result: contextResult });
+                            emit("agent:action", contextExplanation);
+                            continue;
+                        }
+
                         if (cmd.type === "agent:change_step_delay") {
                             const seconds = toNumberIfFinite(cmd.seconds);
                             let delayResult: string;
@@ -2295,12 +2443,25 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                                 actionResult = describeScrollChange(scrollBefore, scrollAfter, cmd.type === "agent:scroll" && !!cmd.element);
                             }
                         } else if (cmd.type === "agent:click") {
+                            // A click that opened a new tab moves the agent into it (the UI does that).
+                            const newTab = trackOwnTab(await tabs.listTabs().catch(() => [] as AgentTabInfo[]));
+                            if (newTab) {
+                                console.log(`[Agent] Click opened a new tab; continuing there: ${newTab.url}`);
+                                // The new tab's webview takes a moment to attach before it can load.
+                                let surface: ActiveSurface | null = null;
+                                for (let i = 0; i < 10 && !surface; i++) {
+                                    surface = await getAgentSurface();
+                                    if (!surface) await sleepInterruptible(200, 50);
+                                }
+                                if (surface) await waitForPageLoad(surface.wc, PAGE_LOAD_TIMEOUT_MS);
+                                actionResult = `opened a new tab (${newTab.url}); you are now working in that tab, and your previous tab is still open`;
+                            }
                             // If the click started a navigation, let it finish — but not for longer than
                             // PAGE_LOAD_TIMEOUT_MS, since ad-heavy pages may never stop loading.
-                            const clickedSurface = await getAgentSurface();
+                            const clickedSurface = newTab ? null : await getAgentSurface();
                             if (clickedSurface) await waitForPageLoad(clickedSurface.wc, PAGE_LOAD_TIMEOUT_MS);
                             // Re-read the surface: the navigation may have swapped the main frame.
-                            const webviewInfo = await getAgentSurface();
+                            const webviewInfo = newTab ? null : await getAgentSurface();
                             if (webviewInfo) {
                                 // Frame-level call: WebContents.executeJavaScript would wait for the load to finish.
                                 actionResult = await runInMainFrame<string>(webviewInfo.wc, `

@@ -2447,6 +2447,17 @@ function App() {
     const cleanup = window.api?.onOpenUrlInNewTab((_event: any, url: string, info?: { disposition?: string; openerId?: number }) => {
       if (!url) return;
       const opener = info?.openerId != null ? findTabByWebContentsId(info.openerId) : undefined;
+      // A page a running agent is driving opened a new tab (target="_blank", window.open):
+      // the agent carries on in the new tab. It only comes to the front if you were
+      // watching the agent's tab, so an agent working in the background never steals focus.
+      const agentSession = opener && [...agentTabBySessionRef.current]
+        .find(([sid, tabId]) => tabId === opener.id && runningAgentsRef.current[sid])?.[0];
+      if (agentSession) {
+        const tabId = addTab(url, { background: info?.disposition === "background-tab" || !opener.isActive, openerId: opener.id });
+        pendingAgentTabsRef.current.add(tabId);
+        setAgentTab(agentSession, tabId);
+        return;
+      }
       addTab(url, { background: info?.disposition === "background-tab", openerId: opener?.id });
     });
     return () => cleanup?.();

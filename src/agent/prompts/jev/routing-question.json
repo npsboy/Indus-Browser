@@ -1,8 +1,8 @@
 {
     "type": "choice",
-    "instructions": "The user typed this text into the search box of a browser with a built-in AI assistant that can answer questions and also carry out tasks in the browser on the user's behalf. Should it go to a plain web search engine, or to the AI assistant chat? Only choose web-search when the text is clearly just keywords, a site or brand name, or a simple lookup. Anything phrased as a question, a request, or a command to do something (including browser tasks like 'go solve today's wordle' or 'book a table') belongs in the AI chat.",
+    "instructions": "The user typed this text into the search box of a browser with a built-in AI assistant that answers questions and can also carry out tasks in the browser on the user's behalf. Route it to a plain web search engine or to the AI assistant chat. Choose web-search only when the text is clearly just keywords, a site or brand name, or a simple lookup. Anything phrased as a question, request or command (including browser tasks like 'go solve today's wordle' or 'book a table') belongs in the AI chat.",
     "criteria": {
-        "web-search": "Plain keywords, a site or brand name, or a simple lookup that a search engine answers well, with no request to do anything.",
-        "ai-chat": "A question, a request, an instruction, or a task for the assistant to perform or automate, including tasks to be done in the browser."
+        "web-search": "Plain keywords, a site or brand name, or a simple lookup a search engine answers well, with no request to do anything.",
+        "ai-chat": "A question, request, instruction, or task for the assistant to perform or automate, including tasks to be done in the browser."
     }
 }

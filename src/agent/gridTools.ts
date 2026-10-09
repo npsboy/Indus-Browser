@@ -2,6 +2,13 @@
  * Tool schemas for the legacy grid-coordinate targeting mode: elements are
  * picked by the grid coordinates drawn over the screenshot.
  */
+
+/** Shared by every action tool: saved to the notepad as part of the action, at no extra step. */
+const NOTE_PARAM = {
+    type: "string",
+    description: "Short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, decided and why, what is done or already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new.",
+};
+
 export const GRID_MODE_TOOLS = [
     {
         type: "function",
@@ -15,7 +22,7 @@ export const GRID_MODE_TOOLS = [
                     y: { type: "string", description: "The row no of the element to click." },
                     click_count: { type: "string", description: "The number of times to click. Can be 1 for a single click, 2 for a double click, etc." },
                     explanation: { type: "string", description: "one tiny sentence describing what you just clicked." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["x", "y"]
             }
@@ -32,7 +39,7 @@ export const GRID_MODE_TOOLS = [
                     text: { type: "string", description: "The text to input." },
                     press_enter: { type: "boolean", description: "Press Enter after typing, e.g. to submit a search. Defaults to false." },
                     explanation: { type: "string", description: "one tiny sentence describing what you just typed." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["text"]
             }
@@ -48,7 +55,7 @@ export const GRID_MODE_TOOLS = [
                 properties: {
                     key: { type: "string", description: "The key to press. Use special names for non-character keys, e.g. 'Enter', 'Tab', 'ArrowDown'." },
                     explanation: { type: "string", description: "one tiny sentence describing what you just did with the key press." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["key"]
             }
@@ -65,7 +72,7 @@ export const GRID_MODE_TOOLS = [
                     url: { type: "string", description: "The URL to navigate to. Use an existing tab's url to navigate to it. return \"back\" if you want to go back." },
                     new_tab: { type: "boolean", description: "Whether to open the URL in a new tab or not." },
                     explanation: { type: "string", description: "one tiny sentence describing why you are navigating there." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["url"]
             }
@@ -84,7 +91,7 @@ export const GRID_MODE_TOOLS = [
                     delta_x: { type: "string", description: "The no of columns to scroll by. Can be positive or negative. Horizontal scrolling is not used much." },
                     delta_y: { type: "string", description: "The no of rows to scroll by. Can be positive or negative." },
                     explanation: { type: "string", description: "one tiny sentence describing why you are scrolling there." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["x", "y", "delta_y"]
             }
@@ -94,13 +101,13 @@ export const GRID_MODE_TOOLS = [
         type: "function",
         function: {
             name: "wait",
-            description: "Wait for a specific ammount of time. Use this if an action is still in progress and you want to avoid interupting it.",
+            description: "Wait for a number of seconds. Use this when an action is still in progress and you don't want to interrupt it.",
             parameters: {
                 type: "object",
                 properties: {
                     seconds: { type: "integer", description: "The number of seconds to wait." },
                     explanation: { type: "string", description: "one tiny sentence describing why you need to wait." },
-                    note: { type: "string", description: "A short log line saved to your notepad (your memory) as part of this action. Fill it in on nearly every action: what you saw, what you decided and why, what is done, what you already checked (e.g. \"Checked the whole cart: only AAA batteries + Oreos, nothing extra\"). Leave empty only if this step taught you nothing new." },
+                    note: NOTE_PARAM,
                 },
                 required: ["seconds"]
             }
@@ -179,6 +186,21 @@ export const GRID_MODE_TOOLS = [
                     explanation: { type: "string", description: "one tiny sentence describing why you need the tips." },
                 },
                 required: ["topic"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_context",
+            description: "Ask for context that was left out of your step because it didn't look needed (listed at the end of your message under \"Left out\"). It is then included in every later step.",
+            parameters: {
+                type: "object",
+                properties: {
+                    item: { type: "string", enum: ["conversation", "open_tabs", "scroll_position", "step_delay", "older_actions"], description: "The id of the left-out context you need." },
+                    explanation: { type: "string", description: "one tiny sentence describing why you need it." },
+                },
+                required: ["item"]
             }
         }
     },

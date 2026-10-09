@@ -1,0 +1,58 @@
+{
+    "conversation": {
+        "type": "noul",
+        "instructions": "A browser agent is working on one step (the task) of a larger request. available_context.conversation previews that overall request, including the conversation so far. Would the agent need it to do this step correctly, e.g. the step refers to earlier messages, leaves out details only the overall request has, or the agent could overstep into other parts of the request? Answer false only when the step is fully self-contained. When unsure, answer true.",
+        "criteria": {
+            "true": "The overall request or conversation is needed to do the current step correctly.",
+            "false": "The step is self-contained; the overall request adds nothing for it."
+        }
+    },
+    "open_tabs": {
+        "type": "noul",
+        "instructions": "A browser agent is working on the task. available_context.open_tabs lists the open browser tabs. Would the agent need this list for what it is doing now, e.g. the task involves switching between, comparing or returning to tabs, or something opened in a new tab? Answer false when the agent works in one tab and the list adds nothing. When unsure, answer true.",
+        "criteria": {
+            "true": "The agent needs to know which tabs are open.",
+            "false": "The agent works in its own tab; the list of tabs is irrelevant."
+        }
+    },
+    "scroll_position": {
+        "type": "noul",
+        "instructions": "A browser agent is working on the task. available_context.scroll_position says where the page is scrolled and how long it is. Would that help the agent now, e.g. it is scrolling through or reading a long page, list or results, or checking that it has seen everything? Answer false when it is just clicking, typing or navigating. When unsure, answer true.",
+        "criteria": {
+            "true": "Knowing the scroll position helps with what the agent is doing.",
+            "false": "Scroll position is irrelevant to what the agent is doing."
+        }
+    },
+    "step_delay": {
+        "type": "noul",
+        "instructions": "A browser agent is working on the task. available_context.step_delay describes a wait the planner set before each of the agent's steps. Would the agent need to know about this wait to act correctly now, e.g. timing-sensitive pages, games, or waiting for something to load or respond? Answer false when the wait doesn't affect how the agent should act. When unsure, answer true.",
+        "criteria": {
+            "true": "The agent should plan its actions around the step delay.",
+            "false": "The step delay doesn't change what the agent should do."
+        }
+    },
+    "older_actions": {
+        "type": "noul",
+        "instructions": "A browser agent always sees its last 5 actions. available_context.older_actions previews the ones before that. Would the agent need those older actions now, e.g. it seems to be repeating or circling, it must remember what it already tried or where it has been, or a multi-step flow depends on earlier steps? Answer false when the recent actions and the notepad already cover it. When unsure, answer true.",
+        "criteria": {
+            "true": "The older actions are needed to act correctly now.",
+            "false": "The recent actions and notepad are enough."
+        }
+    },
+    "planner_notepad": {
+        "type": "noul",
+        "instructions": "A planner is about to break the user's task into steps for a browser agent. agent_notepad is the agent's notepad from earlier in the conversation. Would the planner need it to plan correctly, e.g. the task is a follow-up, refers to earlier results, or part of it is already done? Answer false when the task is new and unrelated to the notes. When unsure, answer true.",
+        "criteria": {
+            "true": "The notepad is needed to plan the task.",
+            "false": "The task can be planned without the notepad."
+        }
+    },
+    "planner_screenshot": {
+        "type": "noul",
+        "instructions": "A planner is about to break the user's task into steps for a browser agent. Would it need a screenshot of the agent's current tab to plan, e.g. the task refers to the current page ('this', 'here', 'on this site'), or the plan depends on what is open right now? Answer false when the task can be planned from its text alone. When unsure, answer true.",
+        "criteria": {
+            "true": "The planner needs to see the current page.",
+            "false": "The task can be planned from its text alone."
+        }
+    }
+}

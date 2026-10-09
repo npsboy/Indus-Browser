@@ -1,9 +1,9 @@
 {
     "type": "choice",
-    "instructions": "A browser agent keeps touching the same element. Decide from its recent actions whether it is stuck in a loop (the same step retried with no sign of effect) or making progress (each repeat is part of a different step, e.g. successive moves in a game, successive rows or pages). Choose progressing only when the actions clearly show the task advancing. Choose escalate when telling them apart needs a look at the screen (e.g. whether a click actually took effect), or the situation is too complex to judge from the action log, so a more capable reviewer with a screenshot takes over.",
+    "instructions": "A browser agent keeps touching the same element. From its recent actions, decide whether it is stuck in a loop (the same step retried with no sign of effect) or making progress (each repeat is part of a different step, e.g. successive moves in a game, rows or pages). Choose progressing only when the actions clearly show the task advancing. Choose escalate when telling them apart needs a look at the screen (e.g. whether a click took effect) or the situation is too complex to judge from the action log.",
     "criteria": {
-        "stuck": "The same action is being retried with no evidence it changed anything, or the agent keeps redoing a step it already did.",
-        "progressing": "The repeated target is being used for different, advancing steps; the explanations show the task moving forward.",
-        "escalate": "Verifying it needs a screenshot of the page, or the situation is too complex to judge from the action log alone; hand it to a more capable reviewer."
+        "stuck": "The same action is retried with no evidence it changed anything, or the agent keeps redoing a step it already did.",
+        "progressing": "The repeated target is used for different, advancing steps; the explanations show the task moving forward.",
+        "escalate": "Verifying needs a screenshot of the page, or the situation is too complex to judge from the action log alone; hand it to a more capable reviewer."
     }
 }

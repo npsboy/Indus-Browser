@@ -69,6 +69,21 @@ export function jsonModePayload(messages: LlmMessage[], imageUrl?: string) {
     return { messages: buildMessages(messages, imageUrl), response_format: { type: "json_object" } };
 }
 
+/**
+ * Parses a JSON-mode reply. Some models still wrap it in a ```json fence or add text around
+ * it, so fall back to the outermost {...} when the reply isn't plain JSON. Throws if none parses.
+ */
+export function parseJsonReply(reply: string): any {
+    try {
+        return JSON.parse(reply);
+    } catch (error) {
+        const start = reply.indexOf("{");
+        const end = reply.lastIndexOf("}");
+        if (start === -1 || end <= start) throw error;
+        return JSON.parse(reply.slice(start, end + 1));
+    }
+}
+
 /** Asks the decision model (Jev): state + typed questions in, typed answers out. */
 export async function askDecider(state: Record<string, unknown>, questions: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
     const response = await postLlm("decider", { state, questions }, signal);
